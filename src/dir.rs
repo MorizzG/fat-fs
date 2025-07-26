@@ -24,6 +24,27 @@ bitflags! {
     }
 }
 
+impl Display for Attr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut if_has_attr = |attr: Attr, c: char| {
+            if self.contains(attr) {
+                write!(f, "{}", c)
+            } else {
+                write!(f, "-")
+            }
+        };
+
+        if_has_attr(Attr::ReadOnly, 'R')?;
+        if_has_attr(Attr::Hidden, 'H')?;
+        if_has_attr(Attr::System, 'S')?;
+        if_has_attr(Attr::VolumeId, 'V')?;
+        if_has_attr(Attr::Directory, 'D')?;
+        if_has_attr(Attr::Archive, 'A')?;
+
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 pub struct RegularDirEntry {
     name: [u8; 11],
