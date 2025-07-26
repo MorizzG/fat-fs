@@ -250,12 +250,8 @@ impl Bpb {
 
     /// first data sector
     pub fn first_data_sector(&self) -> u32 {
-        println!("reserved sectors: {}", self.reserved_sector_count());
-        println!("fat sectors: {}", self.num_fats() as u32 * self.fat_size());
-        println!("root dir sectors: {}", self.root_dir_sectors());
-
         self.reserved_sector_count() as u32
-            + (self.num_fats() as u32 + self.fat_size())
+            + (self.num_fats() as u32 * self.fat_size())
             + self.root_dir_sectors() as u32
     }
 
