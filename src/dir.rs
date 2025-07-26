@@ -157,6 +157,16 @@ impl RegularDirEntry {
         self.name[0] == 0x00
     }
 
+    pub fn is_file(&self) -> bool {
+        !self
+            .attr
+            .intersects(Attr::Directory | Attr::System | Attr::VolumeId)
+    }
+
+    pub fn is_dir(&self) -> bool {
+        self.attr.contains(Attr::Directory) && !self.attr.intersects(Attr::System | Attr::VolumeId)
+    }
+
     pub fn name(&self) -> &[u8] {
         &self.name
     }
