@@ -76,7 +76,7 @@ impl Display for RegularDirEntry {
 
         write!(
             f,
-            "DirEntry {{ {} {: <16}    created: {}    modified: {} }}",
+            "{} {: <16}    created: {}    modified: {}",
             self.attr,
             name,
             self.create_time().format("%a %b %d %H:%M:%S%.3f %Y"),
