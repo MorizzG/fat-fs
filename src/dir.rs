@@ -76,10 +76,11 @@ impl Display for RegularDirEntry {
 
         write!(
             f,
-            "DirEntry {{ {: <16}    created: {}    modified: {} }}",
+            "DirEntry {{ {} {: <16}    created: {}    modified: {} }}",
+            self.attr,
             name,
-            self.create_time(),
-            self.write_time()
+            self.create_time().format("%a %b %d %H:%M:%S%.3f %Y"),
+            self.write_time().format("%a %b %d %H:%M:%S%.3f %Y")
         )?;
 
         Ok(())
