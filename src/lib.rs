@@ -1,4 +1,6 @@
-use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::cell::RefCell;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::rc::Rc;
 
 use crate::dir::{DirIter, RegularDirEntry};
 use crate::fat::{FatError, Fatty};
@@ -94,7 +96,7 @@ impl SliceLike for std::fs::File {
 
 #[allow(dead_code)]
 pub struct FatFs<S: SliceLike> {
-    data: S,
+    inner: Rc<RefCell<S>>,
 
     fat_offset: u64,
     fat_size: usize,
@@ -150,8 +152,10 @@ impl<S: SliceLike> FatFs<S> {
 
         let bytes_per_cluster = bpb.bytes_per_cluster();
 
+        let data = Rc::new(RefCell::new(data));
+
         Ok(FatFs {
-            data,
+            inner: data,
             fat_offset,
             fat_size,
             root_dir_offset,
@@ -194,7 +198,7 @@ impl<S: SliceLike> FatFs<S> {
         SubSliceMut::new(self, offset, self.bytes_per_cluster)
     }
 
-    pub fn cluster_as_subslice(&mut self, cluster: u32) -> SubSlice<'_, S> {
+    pub fn cluster_as_subslice(&self, cluster: u32) -> SubSlice<'_, S> {
         let offset = self.data_cluster_to_offset(cluster);
 
         SubSlice::new(self, offset, self.bytes_per_cluster)
@@ -215,20 +219,20 @@ impl<S: SliceLike> FatFs<S> {
 
         let mut data = vec![0; self.bytes_per_cluster];
 
-        self.data
-            .read_at_offset(self.data_cluster_to_offset(cluster), &mut data)?;
+        let mut inner = self.inner.borrow_mut();
+
+        inner.read_at_offset(self.data_cluster_to_offset(cluster), &mut data)?;
 
         while let Ok(Some(next_cluster)) = self.next_cluster(cluster) {
             cluster = next_cluster;
 
-            self.data
-                .read_at_offset(self.data_cluster_to_offset(cluster), &mut data)?;
+            inner.read_at_offset(self.data_cluster_to_offset(cluster), &mut data)?;
         }
 
         Ok(data)
     }
 
-    pub fn root_dir_iter(&mut self) -> Box<dyn Iterator<Item = RegularDirEntry> + '_> {
+    pub fn root_dir_iter(&self) -> Box<dyn Iterator<Item = RegularDirEntry> + '_> {
         // TODO: maybe wrap this in another RootDirIter enum, so we don't have to Box<dyn>
 
         if let Some(root_dir_offset) = self.root_dir_offset {
@@ -247,5 +251,9 @@ impl<S: SliceLike> FatFs<S> {
         let cluster_iter = iter::ClusterChainReader::new(self, root_cluster);
 
         Box::new(DirIter::new(cluster_iter))
+    }
+
+    pub fn chain_reader(&self, first_cluster: u32) -> impl Read {
+        iter::ClusterChainReader::new(self, first_cluster)
     }
 }

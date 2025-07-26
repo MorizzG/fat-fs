@@ -44,7 +44,8 @@ impl<S: SliceLike> Read for SubSliceMut<'_, S> {
         let bytes_to_read = self.len.min(buf.len());
 
         self.fat_fs
-            .data
+            .inner
+            .borrow_mut()
             .read_at_offset(self.offset, &mut buf[..bytes_to_read])?;
 
         self.offset += bytes_to_read as u64;
@@ -59,7 +60,8 @@ impl<S: SliceLike> Write for SubSliceMut<'_, S> {
         let bytes_to_write = self.len.min(buf.len());
 
         self.fat_fs
-            .data
+            .inner
+            .borrow_mut()
             .write_at_offset(self.offset, &buf[..bytes_to_write])?;
 
         self.offset += bytes_to_write as u64;
@@ -74,7 +76,7 @@ impl<S: SliceLike> Write for SubSliceMut<'_, S> {
 }
 
 pub struct SubSlice<'a, S: SliceLike> {
-    fat_fs: &'a mut FatFs<S>,
+    fat_fs: &'a FatFs<S>,
 
     offset: u64,
     len: usize,
@@ -90,7 +92,7 @@ impl<S: SliceLike> Debug for SubSlice<'_, S> {
 }
 
 impl<S: SliceLike> SubSlice<'_, S> {
-    pub fn new(fat_fs: &mut FatFs<S>, offset: u64, len: usize) -> SubSlice<'_, S> {
+    pub fn new(fat_fs: &FatFs<S>, offset: u64, len: usize) -> SubSlice<'_, S> {
         SubSlice {
             fat_fs,
             offset,
@@ -115,7 +117,7 @@ impl<S: SliceLike> SubSlice<'_, S> {
 }
 
 impl<'a, S: SliceLike> SubSlice<'a, S> {
-    pub fn release(self) -> &'a mut FatFs<S> {
+    pub fn release(self) -> &'a FatFs<S> {
         self.fat_fs
     }
 }
@@ -125,7 +127,8 @@ impl<S: SliceLike> Read for SubSlice<'_, S> {
         let bytes_to_read = self.len.min(buf.len());
 
         self.fat_fs
-            .data
+            .inner
+            .borrow_mut()
             .read_at_offset(self.offset, &mut buf[..bytes_to_read])?;
 
         self.offset += bytes_to_read as u64;

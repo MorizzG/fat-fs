@@ -1,6 +1,5 @@
 use std::io::Read;
 
-use crate::fat::Fatty;
 use crate::subslice::SubSlice;
 use crate::utils::replace;
 use crate::{FatFs, SliceLike};
@@ -12,7 +11,7 @@ pub struct ClusterChainReader<'a, S: SliceLike> {
 }
 
 impl<'a, S: SliceLike> ClusterChainReader<'a, S> {
-    pub fn new(fat_fs: &'a mut FatFs<S>, first_cluster: u32) -> ClusterChainReader<'a, S> {
+    pub fn new(fat_fs: &'a FatFs<S>, first_cluster: u32) -> ClusterChainReader<'a, S> {
         let next_cluster = fat_fs.next_cluster(first_cluster).unwrap_or(None);
 
         let sub_slice = fat_fs.cluster_as_subslice(first_cluster);
