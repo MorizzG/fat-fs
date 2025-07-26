@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use std::io::{Read, Write};
 
 use crate::{FatFs, SliceLike};
@@ -7,6 +8,15 @@ pub struct SubSliceMut<'a, S: SliceLike> {
 
     offset: u64,
     len: usize,
+}
+
+impl<S: SliceLike> Debug for SubSliceMut<'_, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubSliceMut")
+            .field("offset", &self.offset)
+            .field("len", &self.len)
+            .finish()
+    }
 }
 
 impl<S: SliceLike> SubSliceMut<'_, S> {
@@ -68,6 +78,15 @@ pub struct SubSlice<'a, S: SliceLike> {
 
     offset: u64,
     len: usize,
+}
+
+impl<S: SliceLike> Debug for SubSlice<'_, S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SubSliceMut")
+            .field("offset", &self.offset)
+            .field("len", &self.len)
+            .finish()
+    }
 }
 
 impl<S: SliceLike> SubSlice<'_, S> {
