@@ -1,7 +1,8 @@
 use std::io::Read;
 
-use fat_rs::FatFs;
+use fat_rs::dir::{DirIter, RegularDirEntry};
 use fat_rs::fat::Fatty as _;
+use fat_rs::{FatFs, SliceLike};
 
 pub fn main() -> anyhow::Result<()> {
     let args = std::env::args();
@@ -38,5 +39,45 @@ pub fn main() -> anyhow::Result<()> {
         println!("{}", dir_entry);
     }
 
+    println!();
+    println!();
+
+    tree(&fat_fs);
+
     Ok(())
+}
+
+fn tree<S: SliceLike>(fat_fs: &FatFs<S>) {
+    fn do_indent(indent: u32) {
+        for _ in 0..indent {
+            print!("    ");
+        }
+    }
+
+    fn tree_impl<S: SliceLike>(
+        fat_fs: &FatFs<S>,
+        iter: impl Iterator<Item = RegularDirEntry>,
+        indent: u32,
+    ) {
+        for dir_entry in iter.filter(|x| !x.is_hidden()) {
+            do_indent(indent);
+
+            println!("{}", dir_entry);
+
+            if dir_entry.is_dot() || dir_entry.is_dotdot() {
+                // do not descent into . and ..
+                continue;
+            }
+
+            if dir_entry.is_dir() {
+                let reader = fat_fs.chain_reader(dir_entry.first_cluster());
+
+                let iter = DirIter::new(reader);
+
+                tree_impl(fat_fs, iter, indent + 1);
+            }
+        }
+    }
+
+    tree_impl(fat_fs, fat_fs.root_dir_iter(), 0);
 }
