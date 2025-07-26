@@ -167,6 +167,30 @@ impl RegularDirEntry {
         self.attr.contains(Attr::Directory) && !self.attr.intersects(Attr::System | Attr::VolumeId)
     }
 
+    pub fn is_dot(&self) -> bool {
+        if !self.is_dir() {
+            return false;
+        }
+
+        // &self.name[..2] == &[b'.', b' ']
+
+        self.name[0] == b'.' && &self.name[1..] == &[b' '; 10]
+    }
+
+    pub fn is_dotdot(&self) -> bool {
+        if !self.is_dir() {
+            return false;
+        }
+
+        // &self.name[..3] == &[b'.', b'.', b' ']
+
+        &self.name[..2] == &[b'.', b'.'] && &self.name[2..] == &[b' '; 9]
+    }
+
+    pub fn is_hidden(&self) -> bool {
+        self.is_dot() || self.is_dotdot() || self.attr.contains(Attr::Hidden)
+    }
+
     pub fn name(&self) -> &[u8] {
         &self.name
     }
