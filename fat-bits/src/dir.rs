@@ -192,8 +192,28 @@ impl DirEntry {
         self.is_dot() || self.is_dotdot() || self.attr.contains(Attr::Hidden)
     }
 
+    pub fn is_readonly(&self) -> bool {
+        self.attr.contains(Attr::ReadOnly)
+    }
+
     pub fn name(&self) -> &[u8] {
         &self.name
+    }
+
+    pub fn stem(&self) -> &[u8] {
+        &self.name()[..8]
+    }
+
+    pub fn stem_str(&self) -> Option<&str> {
+        std::str::from_utf8(self.stem()).ok()
+    }
+
+    pub fn extension(&self) -> &[u8] {
+        &self.name()[8..]
+    }
+
+    pub fn extension_str(&self) -> Option<&str> {
+        std::str::from_utf8(self.extension()).ok()
     }
 
     pub fn name_string(&self) -> Option<String> {
