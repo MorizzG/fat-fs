@@ -45,8 +45,9 @@ impl Display for Attr {
     }
 }
 
+/// represents an entry in a diectory
 #[derive(Debug)]
-pub struct RegularDirEntry {
+pub struct DirEntry {
     name: [u8; 11],
     attr: Attr,
 
@@ -66,7 +67,7 @@ pub struct RegularDirEntry {
     long_name: Option<String>,
 }
 
-impl Display for RegularDirEntry {
+impl Display for DirEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mut name = self.name_string().unwrap_or_else(|| "<unknown>".to_owned());
 
@@ -87,8 +88,8 @@ impl Display for RegularDirEntry {
     }
 }
 
-impl RegularDirEntry {
-    pub fn load(bytes: &[u8]) -> anyhow::Result<RegularDirEntry> {
+impl DirEntry {
+    pub fn load(bytes: &[u8]) -> anyhow::Result<DirEntry> {
         assert_eq!(bytes.len(), 32);
 
         let name = bytes[..11].try_into().unwrap();
@@ -129,7 +130,7 @@ impl RegularDirEntry {
             )
         }
 
-        Ok(RegularDirEntry {
+        Ok(DirEntry {
             name,
             attr,
             create_time_tenths,
@@ -273,7 +274,10 @@ impl RegularDirEntry {
     }
 }
 
-pub struct LongNameDirEntry {
+/// long filename entry in a directory
+///
+/// this should not be exposed to end users, only for internal consumption in the DirIter
+struct LongNameDirEntry {
     ordinal: u8,
     is_last: bool,
     name: [u16; 13],
@@ -330,7 +334,7 @@ impl LongNameDirEntry {
         self.ordinal
     }
 
-    pub fn is_first(&self) -> bool {
+    pub fn is_last(&self) -> bool {
         self.is_last
     }
 
@@ -343,21 +347,25 @@ impl LongNameDirEntry {
     }
 }
 
-pub enum DirEntry {
-    Regular(RegularDirEntry),
+/// wraps both Regular DirEntry and LongNameDirEntry
+///
+/// should not be exposed publicly, end users only see DirEntries
+/// just for making the bytes -> DirEntry loading a bit easier
+enum DirEntryWrapper {
+    Regular(DirEntry),
     LongName(LongNameDirEntry),
 }
 
-impl DirEntry {
-    pub fn load(bytes: &[u8]) -> anyhow::Result<DirEntry> {
+impl DirEntryWrapper {
+    pub fn load(bytes: &[u8]) -> anyhow::Result<DirEntryWrapper> {
         assert_eq!(bytes.len(), 32);
 
         let attr = Attr::from_bits_truncate(bytes[11]);
 
         let dir_entry = if attr == Attr::LongName {
-            DirEntry::LongName(LongNameDirEntry::load(bytes)?)
+            DirEntryWrapper::LongName(LongNameDirEntry::load(bytes)?)
         } else {
-            DirEntry::Regular(RegularDirEntry::load(bytes)?)
+            DirEntryWrapper::Regular(DirEntry::load(bytes)?)
         };
 
         Ok(dir_entry)
@@ -379,7 +387,7 @@ impl LongFilenameBuf {
     }
 
     pub fn next(&mut self, dir_entry: LongNameDirEntry) -> anyhow::Result<()> {
-        if dir_entry.is_last {
+        if dir_entry.is_last() {
             // first/lasts entry
 
             let mut name = dir_entry.name();
@@ -470,51 +478,53 @@ impl<R: Read> DirIter<R> {
             long_filename_buf: Default::default(),
         }
     }
-}
 
-impl<R: Read> Iterator for DirIter<R> {
-    type Item = RegularDirEntry;
-
-    fn next(&mut self) -> Option<Self::Item> {
+    /// inner function for iterator
+    fn next_impl(&mut self) -> anyhow::Result<Option<DirEntry>> {
         let mut chunk = [0; 32];
-        self.reader.read_exact(&mut chunk).ok()?;
+        if self.reader.read_exact(&mut chunk).is_err() {
+            // reading failed; nothing we can do here
+            return Ok(None);
+        }
 
         // let Ok(dir_entry) = DirEntry::load(&chunk) else {
         //     return self.next();
         // };
 
-        let dir_entry = match DirEntry::load(&chunk) {
-            Ok(dir_entry) => dir_entry,
-            Err(e) => {
-                // if loading fails: print error and try next entry
-                eprintln!("failed to load dir entry: {e}");
-
-                return self.next();
-            }
-        };
+        let dir_entry = DirEntryWrapper::load(&chunk)
+            .map_err(|e| anyhow::anyhow!("failed to load dir entry: {e}"))?;
 
         let mut dir_entry = match dir_entry {
-            DirEntry::Regular(dir_entry) => dir_entry,
-            DirEntry::LongName(long_name) => {
-                if let Err(e) = self.long_filename_buf.next(long_name) {
-                    eprintln!("invalid long filename entry: {}", e);
-                }
+            DirEntryWrapper::Regular(dir_entry) => dir_entry,
+            DirEntryWrapper::LongName(long_name) => {
+                self.long_filename_buf.next(long_name).map_err(|e| {
+                    self.long_filename_buf.reset();
+                    anyhow::anyhow!("invalid long filename entry: {e}")
+                })?;
 
-                // simply skip long name entries for now
-                return self.next();
+                return self.next_impl();
             }
         };
 
         if dir_entry.is_sentinel() {
-            return None;
+            return Ok(None);
         }
 
         if dir_entry.is_empty() {
-            return self.next();
+            return self.next_impl();
         }
 
-        match self.long_filename_buf.get_buf(dir_entry.checksum()) {
-            Ok(Some(iter)) => {
+        match self
+            .long_filename_buf
+            .get_buf(dir_entry.checksum())
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "failed to get long filename for {}: {}",
+                    dir_entry.name_string().as_deref().unwrap_or("<invalid>"),
+                    e
+                )
+            })? {
+            Some(iter) => {
                 // attach long filename to dir_entry
 
                 let long_filename: String =
@@ -522,18 +532,83 @@ impl<R: Read> Iterator for DirIter<R> {
 
                 dir_entry.set_long_name(long_filename);
             }
-            Ok(None) => {} // no long filename -> do nothing
-            Err(e) => {
-                eprintln!(
-                    "failed to get long filename for {}: {}",
-                    dir_entry.name_string().as_deref().unwrap_or("<invalid>"),
-                    e
-                );
-            }
+            None => {} // no long filename -> do nothing
         }
 
         self.long_filename_buf.reset();
 
-        Some(dir_entry)
+        Ok(Some(dir_entry))
+    }
+}
+
+impl<R: Read> Iterator for DirIter<R> {
+    type Item = DirEntry;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.next_impl() {
+            Ok(x) => x,
+            Err(e) => {
+                eprintln!("{}", e);
+
+                self.next()
+            }
+        }
+
+        // let mut chunk = [0; 32];
+        // self.reader.read_exact(&mut chunk).ok()?;
+
+        // let dir_entry = match DirEntryWrapper::load(&chunk) {
+        //     Ok(dir_entry) => dir_entry,
+        //     Err(e) => {
+        //         // if loading fails: print error and try next entry
+        //         eprintln!("failed to load dir entry: {e}");
+
+        //         return self.next();
+        //     }
+        // };
+
+        // let mut dir_entry = match dir_entry {
+        //     DirEntryWrapper::Regular(dir_entry) => dir_entry,
+        //     DirEntryWrapper::LongName(long_name) => {
+        //         if let Err(e) = self.long_filename_buf.next(long_name) {
+        //             self.long_filename_buf.reset();
+        //
+        //             eprintln!("invalid long filename entry: {}", e);
+        //         }
+
+        //         return self.next();
+        //     }
+        // };
+
+        // if dir_entry.is_sentinel() {
+        //     return None;
+        // }
+
+        // if dir_entry.is_empty() {
+        //     return self.next();
+        // }
+
+        // match self.long_filename_buf.get_buf(dir_entry.checksum()) {
+        //     Ok(Some(iter)) => {
+        //         // attach long filename to dir_entry
+
+        //         let long_filename: String =
+        //             char::decode_utf16(iter).filter_map(|x| x.ok()).collect();
+
+        //         dir_entry.set_long_name(long_filename);
+        //     }
+        //     Ok(None) => {} // no long filename -> do nothing
+        //     Err(e) => {
+        //         eprintln!(
+        //             "failed to get long filename for {}: {}",
+        //             dir_entry.name_string().as_deref().unwrap_or("<invalid>"),
+        //             e
+        //         );
+        //     }
+        // }
+
+        // self.long_filename_buf.reset();
+
+        // Some(dir_entry)
     }
 }

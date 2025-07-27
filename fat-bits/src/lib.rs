@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::rc::Rc;
 
-use crate::dir::{DirIter, RegularDirEntry};
+use crate::dir::{DirEntry, DirIter};
 use crate::fat::{FatError, Fatty};
 use crate::subslice::{SubSlice, SubSliceMut};
 
@@ -224,7 +224,7 @@ impl<S: SliceLike> FatFs<S> {
         Ok(data)
     }
 
-    pub fn root_dir_iter(&self) -> Box<dyn Iterator<Item = RegularDirEntry> + '_> {
+    pub fn root_dir_iter(&self) -> Box<dyn Iterator<Item = DirEntry> + '_> {
         // TODO: maybe wrap this in another RootDirIter enum, so we don't have to Box<dyn>
 
         if let Some(root_dir_offset) = self.root_dir_offset {

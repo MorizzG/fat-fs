@@ -1,4 +1,4 @@
-use fat_bits::dir::{DirIter, RegularDirEntry};
+use fat_bits::dir::{DirIter, DirEntry};
 use fat_bits::fat::Fatty as _;
 use fat_bits::{FatFs, SliceLike};
 
@@ -50,7 +50,7 @@ fn tree<S: SliceLike>(fat_fs: &FatFs<S>, show_hidden: bool) {
 
     fn tree_impl<S: SliceLike>(
         fat_fs: &FatFs<S>,
-        iter: impl Iterator<Item = RegularDirEntry>,
+        iter: impl Iterator<Item = DirEntry>,
         show_hidden: bool,
         indent: u32,
     ) {
