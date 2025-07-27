@@ -42,12 +42,12 @@ pub fn main() -> anyhow::Result<()> {
     println!();
     println!();
 
-    tree(&fat_fs);
+    tree(&fat_fs, false);
 
     Ok(())
 }
 
-fn tree<S: SliceLike>(fat_fs: &FatFs<S>) {
+fn tree<S: SliceLike>(fat_fs: &FatFs<S>, show_hidden: bool) {
     fn do_indent(indent: u32) {
         for _ in 0..indent {
             print!("    ");
@@ -57,9 +57,10 @@ fn tree<S: SliceLike>(fat_fs: &FatFs<S>) {
     fn tree_impl<S: SliceLike>(
         fat_fs: &FatFs<S>,
         iter: impl Iterator<Item = RegularDirEntry>,
+        show_hidden: bool,
         indent: u32,
     ) {
-        for dir_entry in iter.filter(|x| !x.is_hidden()) {
+        for dir_entry in iter.filter(|x| show_hidden || !x.is_hidden()) {
             do_indent(indent);
 
             println!("{}", dir_entry);
@@ -74,10 +75,10 @@ fn tree<S: SliceLike>(fat_fs: &FatFs<S>) {
 
                 let iter = DirIter::new(reader);
 
-                tree_impl(fat_fs, iter, indent + 1);
+                tree_impl(fat_fs, iter, show_hidden, indent + 1);
             }
         }
     }
 
-    tree_impl(fat_fs, fat_fs.root_dir_iter(), 0);
+    tree_impl(fat_fs, fat_fs.root_dir_iter(), show_hidden, 0);
 }

@@ -5,6 +5,7 @@ use bitflags::bitflags;
 use chrono::{NaiveDate, NaiveDateTime, TimeDelta};
 
 use crate::datetime::{Date, Time};
+use crate::dir;
 use crate::utils::{load_u16_le, load_u32_le};
 
 bitflags! {
@@ -76,11 +77,11 @@ impl Display for RegularDirEntry {
 
         write!(
             f,
-            "{} {: <16}    created: {}    modified: {}",
+            "{}    {}",
             self.attr,
+            // self.create_time().format("%a %b %d %H:%M:%S%.3f %Y"),
+            // self.write_time().format("%a %b %d %H:%M:%S%.3f %Y"),
             name,
-            self.create_time().format("%a %b %d %H:%M:%S%.3f %Y"),
-            self.write_time().format("%a %b %d %H:%M:%S%.3f %Y")
         )?;
 
         Ok(())
@@ -196,7 +197,9 @@ impl RegularDirEntry {
     }
 
     pub fn name_string(&self) -> Option<String> {
-        // std::str::from_utf8(self.name()).ok()
+        if let Some(long_filename) = self.long_name() {
+            return Some(long_filename.to_owned());
+        }
 
         let name = std::str::from_utf8(&self.name[..8]).ok()?.trim_ascii_end();
         let ext = std::str::from_utf8(&self.name[8..]).ok()?.trim_ascii_end();
@@ -259,15 +262,85 @@ impl RegularDirEntry {
     pub fn file_size(&self) -> u32 {
         self.file_size
     }
+
+    pub fn checksum(&self) -> u8 {
+        let mut checksum: u8 = 0;
+
+        for &x in self.name() {
+            checksum = checksum.rotate_right(1).wrapping_add(x);
+        }
+
+        checksum
+    }
 }
 
-pub struct LongNameDirEntry {}
+pub struct LongNameDirEntry {
+    ordinal: u8,
+    is_last: bool,
+    name: [u16; 13],
+    checksum: u8,
+}
 
 impl LongNameDirEntry {
     pub fn load(bytes: &[u8]) -> anyhow::Result<LongNameDirEntry> {
         assert_eq!(bytes.len(), 32);
 
-        Ok(LongNameDirEntry {})
+        let ordinal = bytes[0] & !0x40;
+        let is_last = (bytes[0] & 0x40) != 0;
+
+        let name1 = &bytes[1..][..10];
+
+        let attr = Attr::from_bits_retain(bytes[11]);
+
+        anyhow::ensure!(attr.contains(Attr::LongName), "not a long name entry");
+        anyhow::ensure!(bytes[12] == 0, "LDIR_Type must be 0, not {}", bytes[12]);
+
+        let checksum = bytes[13];
+
+        let name2 = &bytes[14..][..12];
+
+        anyhow::ensure!(
+            &bytes[26..][..2] == &[0, 0],
+            "LDIR_FstClusLO must be zero, not 0x{:04X}",
+            load_u32_le(&bytes[26..][..2])
+        );
+
+        let name3 = &bytes[28..][..4];
+
+        let mut name = [0; 13];
+
+        for (x, y) in name1
+            .chunks_exact(2)
+            .chain(name2.chunks_exact(2))
+            .chain(name3.chunks_exact(2))
+            .map(|x| load_u16_le(x))
+            .zip(name.iter_mut())
+        {
+            *y = x;
+        }
+
+        Ok(LongNameDirEntry {
+            ordinal,
+            is_last,
+            name,
+            checksum,
+        })
+    }
+
+    pub fn ordinal(&self) -> u8 {
+        self.ordinal
+    }
+
+    pub fn is_first(&self) -> bool {
+        self.is_last
+    }
+
+    pub fn name(&self) -> &[u16] {
+        &self.name
+    }
+
+    pub fn checksum(&self) -> u8 {
+        self.checksum
     }
 }
 
@@ -292,13 +365,111 @@ impl DirEntry {
     }
 }
 
+#[derive(Debug, Default)]
+struct LongFilenameBuf {
+    rev_buf: Vec<u16>,
+    checksum: Option<u8>,
+    last_ordinal: Option<u8>,
+}
+
+impl LongFilenameBuf {
+    pub fn reset(&mut self) {
+        self.rev_buf.clear();
+        self.checksum = None;
+        self.last_ordinal = None;
+    }
+
+    pub fn next(&mut self, dir_entry: LongNameDirEntry) -> anyhow::Result<()> {
+        if dir_entry.is_last {
+            // first/lasts entry
+
+            let mut name = dir_entry.name();
+
+            while name.last() == Some(&0xFFFF) {
+                name = &name[..name.len() - 1];
+            }
+
+            assert!(!name.is_empty());
+
+            self.extend_name(name);
+            self.checksum = Some(dir_entry.checksum());
+            self.last_ordinal = Some(dir_entry.ordinal());
+
+            return Ok(());
+        }
+
+        assert!(self.checksum.is_some());
+
+        anyhow::ensure!(
+            self.checksum == Some(dir_entry.checksum()),
+            "checksum doesn't match previous"
+        );
+
+        anyhow::ensure!(
+            self.last_ordinal.unwrap() != 1,
+            "last ordinal was 1, but found more entries"
+        );
+        anyhow::ensure!(
+            self.last_ordinal.unwrap() - 1 == dir_entry.ordinal,
+            "expected ordinal {}, but found {} instead",
+            self.last_ordinal.unwrap() - 1,
+            dir_entry.ordinal()
+        );
+
+        self.extend_name(dir_entry.name());
+        self.last_ordinal = Some(dir_entry.ordinal());
+
+        Ok(())
+    }
+
+    fn extend_name(&mut self, name: &[u16]) {
+        self.rev_buf.extend(name.iter().rev());
+    }
+
+    pub fn get_buf(&mut self, checksum: u8) -> anyhow::Result<Option<impl Iterator<Item = u16>>> {
+        if self.checksum.is_none() {
+            return Ok(None);
+        }
+
+        anyhow::ensure!(
+            self.last_ordinal.is_some() && self.checksum.is_some(),
+            "long filename buffer is empty"
+        );
+
+        anyhow::ensure!(
+            self.last_ordinal.unwrap() == 1,
+            "last ordinal is {}, not 1",
+            self.last_ordinal.unwrap()
+        );
+        anyhow::ensure!(
+            self.checksum.unwrap() == checksum,
+            "given checksum 0x{:02X} doesn't match previous checksum 0x{:02X}",
+            checksum,
+            self.checksum.unwrap()
+        );
+
+        Ok(Some(self.rev_buf.iter().copied().rev()))
+    }
+}
+
 pub struct DirIter<R: Read> {
     reader: R,
+
+    // long_filename_rev_buf: Vec<u16>,
+    // long_filename_checksum: Option<u8>,
+    // long_filename_last_ordinal: Option<u8>,
+    long_filename_buf: LongFilenameBuf,
 }
 
 impl<R: Read> DirIter<R> {
     pub fn new(reader: R) -> DirIter<R> {
-        DirIter { reader }
+        DirIter {
+            reader,
+            // long_filename_rev_buf: Vec::new(),
+            // long_filename_checksum: None,
+            // long_filename_last_ordinal: None,
+            long_filename_buf: Default::default(),
+        }
     }
 }
 
@@ -323,9 +494,16 @@ impl<R: Read> Iterator for DirIter<R> {
             }
         };
 
-        let DirEntry::Regular(dir_entry) = dir_entry else {
-            // simply skip long name entries for now
-            return self.next();
+        let mut dir_entry = match dir_entry {
+            DirEntry::Regular(dir_entry) => dir_entry,
+            DirEntry::LongName(long_name) => {
+                if let Err(e) = self.long_filename_buf.next(long_name) {
+                    eprintln!("invalid long filename entry: {}", e);
+                }
+
+                // simply skip long name entries for now
+                return self.next();
+            }
         };
 
         if dir_entry.is_sentinel() {
@@ -335,6 +513,27 @@ impl<R: Read> Iterator for DirIter<R> {
         if dir_entry.is_empty() {
             return self.next();
         }
+
+        match self.long_filename_buf.get_buf(dir_entry.checksum()) {
+            Ok(Some(iter)) => {
+                // attach long filename to dir_entry
+
+                let long_filename: String =
+                    char::decode_utf16(iter).filter_map(|x| x.ok()).collect();
+
+                dir_entry.set_long_name(long_filename);
+            }
+            Ok(None) => {} // no long filename -> do nothing
+            Err(e) => {
+                eprintln!(
+                    "failed to get long filename for {}: {}",
+                    dir_entry.name_string().as_deref().unwrap_or("<invalid>"),
+                    e
+                );
+            }
+        }
+
+        self.long_filename_buf.reset();
 
         Some(dir_entry)
     }

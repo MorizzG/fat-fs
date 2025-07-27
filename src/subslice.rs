@@ -117,6 +117,7 @@ impl<S: SliceLike> SubSlice<'_, S> {
 }
 
 impl<'a, S: SliceLike> SubSlice<'a, S> {
+    /// releases the inner &FatFs, consuming self in the process
     pub fn release(self) -> &'a FatFs<S> {
         self.fat_fs
     }
