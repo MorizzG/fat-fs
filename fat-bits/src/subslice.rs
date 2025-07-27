@@ -1,16 +1,16 @@
 use std::fmt::Debug;
 use std::io::{Read, Write};
 
-use crate::{FatFs, SliceLike};
+use crate::FatFs;
 
-pub struct SubSliceMut<'a, S: SliceLike> {
-    fat_fs: &'a mut FatFs<S>,
+pub struct SubSliceMut<'a> {
+    fat_fs: &'a mut FatFs,
 
     offset: u64,
     len: usize,
 }
 
-impl<S: SliceLike> Debug for SubSliceMut<'_, S> {
+impl Debug for SubSliceMut<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SubSliceMut")
             .field("offset", &self.offset)
@@ -19,8 +19,8 @@ impl<S: SliceLike> Debug for SubSliceMut<'_, S> {
     }
 }
 
-impl<S: SliceLike> SubSliceMut<'_, S> {
-    pub fn new(fat_fs: &mut FatFs<S>, offset: u64, len: usize) -> SubSliceMut<'_, S> {
+impl SubSliceMut<'_> {
+    pub fn new(fat_fs: &mut FatFs, offset: u64, len: usize) -> SubSliceMut<'_> {
         SubSliceMut {
             fat_fs,
             offset,
@@ -29,7 +29,7 @@ impl<S: SliceLike> SubSliceMut<'_, S> {
     }
 }
 
-impl<S: SliceLike> SubSliceMut<'_, S> {
+impl SubSliceMut<'_> {
     pub fn len(&self) -> usize {
         self.len
     }
@@ -39,7 +39,7 @@ impl<S: SliceLike> SubSliceMut<'_, S> {
     }
 }
 
-impl<S: SliceLike> Read for SubSliceMut<'_, S> {
+impl Read for SubSliceMut<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let bytes_to_read = self.len.min(buf.len());
 
@@ -55,7 +55,7 @@ impl<S: SliceLike> Read for SubSliceMut<'_, S> {
     }
 }
 
-impl<S: SliceLike> Write for SubSliceMut<'_, S> {
+impl Write for SubSliceMut<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let bytes_to_write = self.len.min(buf.len());
 
@@ -75,14 +75,14 @@ impl<S: SliceLike> Write for SubSliceMut<'_, S> {
     }
 }
 
-pub struct SubSlice<'a, S: SliceLike> {
-    fat_fs: &'a FatFs<S>,
+pub struct SubSlice<'a> {
+    fat_fs: &'a FatFs,
 
     offset: u64,
     len: usize,
 }
 
-impl<S: SliceLike> Debug for SubSlice<'_, S> {
+impl Debug for SubSlice<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SubSliceMut")
             .field("offset", &self.offset)
@@ -91,8 +91,8 @@ impl<S: SliceLike> Debug for SubSlice<'_, S> {
     }
 }
 
-impl<S: SliceLike> SubSlice<'_, S> {
-    pub fn new(fat_fs: &FatFs<S>, offset: u64, len: usize) -> SubSlice<'_, S> {
+impl SubSlice<'_> {
+    pub fn new(fat_fs: &FatFs, offset: u64, len: usize) -> SubSlice<'_> {
         SubSlice {
             fat_fs,
             offset,
@@ -100,11 +100,11 @@ impl<S: SliceLike> SubSlice<'_, S> {
         }
     }
 
-    pub fn fat_fs(&self) -> &FatFs<S> {
+    pub fn fat_fs(&self) -> &FatFs {
         self.fat_fs
     }
 
-    pub fn fat_fs_mut(&self) -> &FatFs<S> {
+    pub fn fat_fs_mut(&self) -> &FatFs {
         self.fat_fs
     }
 
@@ -116,14 +116,14 @@ impl<S: SliceLike> SubSlice<'_, S> {
     }
 }
 
-impl<'a, S: SliceLike> SubSlice<'a, S> {
+impl<'a> SubSlice<'a> {
     /// releases the inner &FatFs, consuming self in the process
-    pub fn release(self) -> &'a FatFs<S> {
+    pub fn release(self) -> &'a FatFs {
         self.fat_fs
     }
 }
 
-impl<S: SliceLike> Read for SubSlice<'_, S> {
+impl Read for SubSlice<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let bytes_to_read = self.len.min(buf.len());
 

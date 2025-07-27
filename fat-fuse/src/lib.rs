@@ -1,52 +1,44 @@
-use std::ffi::c_int;
+mod inode;
 
-use fat_bits::dir::DirEntry;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::ffi::c_int;
+use std::rc::Rc;
+
 use fat_bits::{FatFs, SliceLike};
-use fuser::{FileAttr, Filesystem};
+use fuser::Filesystem;
 use libc::{ENOSYS, EPERM};
 use log::{debug, warn};
 
-#[allow(dead_code)]
-fn dir_entry_to_attr(dir_entry: &DirEntry, ino: u64) -> FileAttr {
-    FileAttr {
-        ino,
-        size: dir_entry.file_size() as u64,
-        blocks: todo!(),
-        atime: todo!(),
-        mtime: todo!(),
-        ctime: todo!(),
-        crtime: todo!(),
-        kind: todo!(),
-        perm: todo!(),
-        nlink: todo!(),
-        uid: todo!(),
-        gid: todo!(),
-        rdev: todo!(),
-        blksize: todo!(),
-        flags: todo!(),
-    }
-}
+use crate::inode::Inode;
 
 #[allow(dead_code)]
-pub struct FatFuse<S: SliceLike> {
-    fat_fs: FatFs<S>,
+pub struct FatFuse {
+    fat_fs: FatFs,
 
     uid: u32,
     gid: u32,
+
+    inode_table: BTreeMap<u64, Inode>,
 }
 
-impl<S: SliceLike> FatFuse<S> {
-    pub fn new(data: S) -> anyhow::Result<FatFuse<S>> {
+impl FatFuse {
+    pub fn new(data: Rc<RefCell<dyn SliceLike>>) -> anyhow::Result<FatFuse> {
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
 
         let fat_fs = FatFs::load(data)?;
 
-        Ok(FatFuse { fat_fs, uid, gid })
+        Ok(FatFuse {
+            fat_fs,
+            uid,
+            gid,
+            inode_table: BTreeMap::new(),
+        })
     }
 }
 
-impl<S: SliceLike> Filesystem for FatFuse<S> {
+impl Filesystem for FatFuse {
     fn init(
         &mut self,
         _req: &fuser::Request<'_>,

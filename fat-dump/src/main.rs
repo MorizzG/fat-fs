@@ -1,6 +1,9 @@
-use fat_bits::dir::{DirIter, DirEntry};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use fat_bits::FatFs;
+use fat_bits::dir::{DirEntry, DirIter};
 use fat_bits::fat::Fatty as _;
-use fat_bits::{FatFs, SliceLike};
 
 pub fn main() -> anyhow::Result<()> {
     let args = std::env::args();
@@ -19,7 +22,7 @@ pub fn main() -> anyhow::Result<()> {
 
     // println!("{}", bpb);
 
-    let fat_fs = FatFs::load(file)?;
+    let fat_fs = FatFs::load(Rc::new(RefCell::new(file)))?;
 
     println!("{}", fat_fs.bpb());
     println!();
@@ -41,15 +44,15 @@ pub fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn tree<S: SliceLike>(fat_fs: &FatFs<S>, show_hidden: bool) {
+fn tree(fat_fs: &FatFs, show_hidden: bool) {
     fn do_indent(indent: u32) {
         for _ in 0..indent {
             print!("    ");
         }
     }
 
-    fn tree_impl<S: SliceLike>(
-        fat_fs: &FatFs<S>,
+    fn tree_impl(
+        fat_fs: &FatFs,
         iter: impl Iterator<Item = DirEntry>,
         show_hidden: bool,
         indent: u32,

@@ -26,14 +26,6 @@ pub trait SliceLike {
     fn read_at_offset(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<()>;
 
     fn write_at_offset(&mut self, offset: u64, bytes: &[u8]) -> std::io::Result<()>;
-
-    fn read_array_at_offset<const N: usize>(&mut self, offset: u64) -> std::io::Result<[u8; N]> {
-        let mut buf = [0; N];
-
-        self.read_at_offset(offset, &mut buf)?;
-
-        Ok(buf)
-    }
 }
 
 impl SliceLike for &mut [u8] {
@@ -87,8 +79,8 @@ impl SliceLike for std::fs::File {
 }
 
 #[allow(dead_code)]
-pub struct FatFs<S: SliceLike> {
-    inner: Rc<RefCell<S>>,
+pub struct FatFs {
+    inner: Rc<RefCell<dyn SliceLike>>,
 
     fat_offset: u64,
     fat_size: usize,
@@ -106,15 +98,18 @@ pub struct FatFs<S: SliceLike> {
     fat: fat::Fat,
 }
 
-impl<S: SliceLike> FatFs<S> {
-    pub fn load(mut data: S) -> anyhow::Result<FatFs<S>> {
-        let bpb_bytes: [u8; 512] = data.read_array_at_offset(0)?;
+impl FatFs {
+    pub fn load(data: Rc<RefCell<dyn SliceLike>>) -> anyhow::Result<FatFs> {
+        let mut bpb_bytes = [0; 512];
+
+        data.borrow_mut().read_at_offset(0, &mut bpb_bytes)?;
 
         let bpb = bpb::Bpb::load(&bpb_bytes)?;
 
         let mut fat_buf = vec![0; bpb.fat_len_bytes()];
 
-        data.read_at_offset(bpb.fat_offset(), &mut fat_buf)?;
+        data.borrow_mut()
+            .read_at_offset(bpb.fat_offset(), &mut fat_buf)?;
 
         let fat = fat::Fat::new(bpb.fat_type(), &fat_buf, bpb.count_of_clusters());
 
@@ -143,8 +138,6 @@ impl<S: SliceLike> FatFs<S> {
         let data_size = bpb.data_len_bytes();
 
         let bytes_per_cluster = bpb.bytes_per_cluster();
-
-        let data = Rc::new(RefCell::new(data));
 
         Ok(FatFs {
             inner: data,
@@ -184,13 +177,13 @@ impl<S: SliceLike> FatFs<S> {
         self.fat().get_next_cluster(cluster)
     }
 
-    pub fn cluster_as_subslice_mut(&mut self, cluster: u32) -> SubSliceMut<'_, S> {
+    pub fn cluster_as_subslice_mut(&mut self, cluster: u32) -> SubSliceMut<'_> {
         let offset = self.data_cluster_to_offset(cluster);
 
         SubSliceMut::new(self, offset, self.bytes_per_cluster)
     }
 
-    pub fn cluster_as_subslice(&self, cluster: u32) -> SubSlice<'_, S> {
+    pub fn cluster_as_subslice(&self, cluster: u32) -> SubSlice<'_> {
         let offset = self.data_cluster_to_offset(cluster);
 
         SubSlice::new(self, offset, self.bytes_per_cluster)
