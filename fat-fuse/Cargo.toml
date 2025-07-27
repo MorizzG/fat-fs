@@ -1,0 +1,12 @@
+[package]
+name = "fat-fuse"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.98"
+fat-bits = { version = "0.1.0", path = "../fat-bits" }
+fuser = "0.15.1"
+libc = "0.2.174"
+log = "0.4.27"
+thiserror = "2.0.12"
