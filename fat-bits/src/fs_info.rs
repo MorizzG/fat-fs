@@ -1,5 +1,6 @@
 use crate::utils::load_u32_le;
 
+#[allow(dead_code)]
 pub struct FsInfo {
     free_count: u32,
     next_free: u32,

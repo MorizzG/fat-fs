@@ -22,7 +22,7 @@ impl Display for ExtBpb {
 pub struct Bpb {
     fat_type: FatType,
 
-    jmp_boot: [u8; 3],
+    // jmp_boot: [u8; 3],
     oem_name: [u8; 8],
     bytes_per_sector: u16,
     sectors_per_cluster: u8,
@@ -52,11 +52,11 @@ impl Display for Bpb {
 
         writeln!(f, "")?;
 
-        writeln!(
-            f,
-            "    jmp_boot: [{:#X}, {:#X}, {:#X}]",
-            self.jmp_boot[0], self.jmp_boot[1], self.jmp_boot[2]
-        )?;
+        // writeln!(
+        //     f,
+        //     "    jmp_boot: [{:#X}, {:#X}, {:#X}]",
+        //     self.jmp_boot[0], self.jmp_boot[1], self.jmp_boot[2]
+        // )?;
 
         writeln!(f, "    oem name: \"{}\"", self.oem_name_str().unwrap_or(""))?;
         writeln!(f, "    bytes per sector: {}", self.bytes_per_sector())?;
@@ -90,7 +90,8 @@ impl Bpb {
     pub fn load(bytes: &[u8]) -> anyhow::Result<Bpb> {
         anyhow::ensure!(bytes.len() >= 512, "invalid BPB of len {}", bytes.len());
 
-        let jmp_boot = bytes[..3].try_into().unwrap();
+        // let jmp_boot = bytes[..3].try_into().unwrap();
+
         let oem_name = bytes[3..][..8].try_into().unwrap();
         let bytes_per_sector = load_u16_le(&bytes[11..][..2]);
 
@@ -145,7 +146,7 @@ impl Bpb {
 
         let mut bpb = Bpb {
             fat_type,
-            jmp_boot,
+            // jmp_boot,
             oem_name,
             bytes_per_sector,
             sectors_per_cluster,

@@ -38,14 +38,6 @@ pub trait SliceLike {
 
 impl SliceLike for &mut [u8] {
     fn read_at_offset(&mut self, offset: u64, buf: &mut [u8]) -> std::io::Result<()> {
-        // anyhow::ensure!(
-        //     offset as usize + buf.len() <= self.len(),
-        //     "reading {} bytes at offset {} is out of bounds for slice of len {}",
-        //     buf.len(),
-        //     offset,
-        //     self.len()
-        // );
-
         if offset as usize + buf.len() > self.len() {
             return Err(std::io::Error::other(anyhow::anyhow!(
                 "reading {} bytes at offset {} is out of bounds for slice of len {}",

@@ -22,6 +22,7 @@ impl Date {
         Ok(date)
     }
 
+    #[allow(dead_code)]
     pub fn from_day_month_year(day: u8, month: u8, year: u16) -> anyhow::Result<Date> {
         anyhow::ensure!(day <= 31, "invalid day: {}", day);
         anyhow::ensure!(month <= 12, "invalid month: {}", month);
@@ -32,6 +33,7 @@ impl Date {
         Ok(Date { repr })
     }
 
+    #[allow(dead_code)]
     pub fn from_system_time(time: SystemTime) -> anyhow::Result<Date> {
         let datetime: DateTime<Utc> = time.into();
 
@@ -73,6 +75,7 @@ impl Time {
         Ok(time)
     }
 
+    #[allow(dead_code)]
     pub fn from_seconds_minutes_hours(seconds: u8, minutes: u8, hours: u8) -> anyhow::Result<Time> {
         anyhow::ensure!(seconds <= 58 && seconds % 2 == 0, "invalid seconds: {}", seconds);
         anyhow::ensure!(minutes <= 59, "invalid minutes: {}", minutes);
@@ -83,6 +86,7 @@ impl Time {
         Ok(Time { repr })
     }
 
+    #[allow(dead_code)]
     pub fn from_system_time(time: SystemTime) -> anyhow::Result<Time> {
         let datetime: DateTime<Utc> = time.into();
 

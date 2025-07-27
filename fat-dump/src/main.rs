@@ -1,8 +1,6 @@
-use std::io::Read;
-
-use fat_rs::dir::{DirIter, RegularDirEntry};
-use fat_rs::fat::Fatty as _;
-use fat_rs::{FatFs, SliceLike};
+use fat_bits::dir::{DirIter, RegularDirEntry};
+use fat_bits::fat::Fatty as _;
+use fat_bits::{FatFs, SliceLike};
 
 pub fn main() -> anyhow::Result<()> {
     let args = std::env::args();
@@ -21,7 +19,7 @@ pub fn main() -> anyhow::Result<()> {
 
     // println!("{}", bpb);
 
-    let mut fat_fs = FatFs::load(file)?;
+    let fat_fs = FatFs::load(file)?;
 
     println!("{}", fat_fs.bpb());
     println!();
@@ -34,10 +32,6 @@ pub fn main() -> anyhow::Result<()> {
             * fat_fs.bpb().bytes_per_sector() as usize
             * fat_fs.bpb().sectors_per_cluster() as usize
     );
-
-    for dir_entry in fat_fs.root_dir_iter() {
-        println!("{}", dir_entry);
-    }
 
     println!();
     println!();

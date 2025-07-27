@@ -42,7 +42,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "fat-bits"
+name = "fat-rs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -51,14 +51,6 @@ dependencies = [
  "enum_dispatch",
  "static_assertions",
  "thiserror",
-]
-
-[[package]]
-name = "fat-dump"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "fat-bits",
 ]
 
 [[package]]

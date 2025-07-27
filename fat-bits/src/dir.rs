@@ -5,7 +5,6 @@ use bitflags::bitflags;
 use chrono::{NaiveDate, NaiveDateTime, TimeDelta};
 
 use crate::datetime::{Date, Time};
-use crate::dir;
 use crate::utils::{load_u16_le, load_u32_le};
 
 bitflags! {
