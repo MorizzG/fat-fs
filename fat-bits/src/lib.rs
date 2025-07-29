@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::rc::Rc;
 
-use crate::dir::{DirEntry, DirIter};
+use crate::dir::DirIter;
 use crate::fat::{FatError, Fatty};
 use crate::subslice::{SubSlice, SubSliceMut};
 
@@ -217,7 +217,12 @@ impl FatFs {
         Ok(data)
     }
 
-    pub fn root_dir_iter(&self) -> Box<dyn Iterator<Item = DirEntry> + '_> {
+    fn chain_reader(&self, first_cluster: u32) -> impl Read {
+        iter::ClusterChainReader::new(self, first_cluster)
+    }
+
+    pub fn root_dir_iter<'a>(&'a self) -> DirIter<Box<dyn Read + 'a>> {
+        // Box<dyn Iterator<Item = DirEntry> + '_>
         // TODO: maybe wrap this in another RootDirIter enum, so we don't have to Box<dyn>
 
         if let Some(root_dir_offset) = self.root_dir_offset {
@@ -225,7 +230,7 @@ impl FatFs {
 
             let sub_slice = SubSlice::new(self, root_dir_offset, self.root_dir_size);
 
-            return Box::new(DirIter::new(sub_slice));
+            return DirIter::new(Box::new(sub_slice));
         }
 
         // FAT32
@@ -235,10 +240,15 @@ impl FatFs {
 
         let cluster_iter = iter::ClusterChainReader::new(self, root_cluster);
 
-        Box::new(DirIter::new(cluster_iter))
+        DirIter::new(Box::new(cluster_iter))
     }
 
-    pub fn chain_reader(&self, first_cluster: u32) -> impl Read {
-        iter::ClusterChainReader::new(self, first_cluster)
+    pub fn dir_iter<'a>(&'a self, first_cluster: u32) -> DirIter<Box<dyn Read + 'a>> {
+        // TODO: return type must match root_dir_iter
+        // if the Box<dyn> is changed there, update here as well
+
+        let cluster_iter = self.chain_reader(first_cluster);
+
+        DirIter::new(Box::new(cluster_iter))
     }
 }

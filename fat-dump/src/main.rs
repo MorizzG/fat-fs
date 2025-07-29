@@ -68,9 +68,7 @@ fn tree(fat_fs: &FatFs, show_hidden: bool) {
             }
 
             if dir_entry.is_dir() {
-                let reader = fat_fs.chain_reader(dir_entry.first_cluster());
-
-                let iter = DirIter::new(reader);
+                let iter = fat_fs.dir_iter(dir_entry.first_cluster());
 
                 tree_impl(fat_fs, iter, show_hidden, indent + 1);
             }
