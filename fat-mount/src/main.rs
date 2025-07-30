@@ -1,6 +1,5 @@
-use std::cell::RefCell;
 use std::fs::File;
-use std::rc::Rc;
+use std::sync::mpsc::channel;
 
 use fat_fuse::FatFuse;
 use fuser::MountOption;
@@ -10,6 +9,7 @@ fn main() -> anyhow::Result<()> {
 
     let mut args = std::env::args();
 
+    let _prog_name = args.next().unwrap();
     let path = args.next().ok_or(anyhow::anyhow!("missing fs path"))?;
     let mountpoint = args.next().ok_or(anyhow::anyhow!("missing mount point"))?;
 
@@ -23,7 +23,18 @@ fn main() -> anyhow::Result<()> {
         MountOption::AutoUnmount,
     ];
 
-    fuser::mount2(fat_fuse, mountpoint, &options).unwrap();
+    let (tx, rx) = channel();
+
+    ctrlc::set_handler(move || {
+        tx.send(()).unwrap();
+    })
+    .unwrap();
+
+    let handle = fuser::spawn_mount2(fat_fuse, mountpoint, &options)?;
+
+    rx.recv().unwrap();
+
+    println!("done");
 
     Ok(())
 }
