@@ -2,12 +2,13 @@ use std::ffi::c_int;
 use std::time::Duration;
 
 use fat_bits::dir::DirEntry;
-use fuser::Filesystem;
-use libc::{EIO, ENOENT, ENOSYS, EPERM};
+use fuser::{FileType, Filesystem};
+use libc::{EINVAL, EIO, ENOENT, ENOSYS, ENOTDIR};
 use log::{debug, warn};
 
-use crate::FatFuse;
-use crate::inode::Inode;
+use crate::{FatFuse, Inode};
+
+const TTL: Duration = Duration::from_secs(1);
 
 impl Filesystem for FatFuse {
     fn init(
@@ -32,14 +33,18 @@ impl Filesystem for FatFuse {
 
         let Some(name) = name.to_str() else {
             // TODO: add proper handling of non-utf8 strings
+            debug!("cannot convert OsStr {:?} to str", name);
             reply.error(ENOSYS);
             return;
         };
+
+        debug!("looking up file {} with parent ino {}", name, parent);
 
         let Some(parent_inode) = self.get_inode(parent) else {
             // parent inode does not exist
             // TODO: how can we make sure this does not happed?
             // TODO: panic?
+            debug!("could not find inode for parent ino {}", parent);
             reply.error(EIO);
 
             return;
@@ -67,29 +72,33 @@ impl Filesystem for FatFuse {
             }) {
             Ok(dir_entry) => dir_entry,
             Err(err) => {
+                debug!("error: {}", err);
                 reply.error(err);
 
                 return;
             }
         };
 
-        let inode = match self.get_inode_by_first_cluster(dir_entry.first_cluster()) {
-            Some(inode) => inode,
-            None => {
-                // no inode found, make a new one
+        // let inode = match self.get_inode_by_first_cluster(dir_entry.first_cluster()) {
+        //     Some(inode) => inode,
+        //     None => {
+        //         // no inode found, make a new one
+        //         let ino = self.next_ino();
 
-                let ino = self.next_ino();
+        //         let inode = Inode::new(&self.fat_fs, &dir_entry, ino, self.uid, self.gid);
 
-                let inode = Inode::new(&self.fat_fs, dir_entry, ino, self.uid, self.gid);
+        //         self.insert_inode(inode)
+        //     }
+        // };
 
-                self.insert_inode(inode)
-            }
-        };
+        let inode = self.get_or_make_inode_by_dir_entry(&dir_entry);
 
         let attr = inode.file_attr();
         let generation = inode.generation();
 
-        reply.entry(&Duration::from_secs(1), &attr, generation as u64);
+        reply.entry(&TTL, &attr, generation as u64);
+
+        inode.refcount_inc();
     }
 
     fn forget(&mut self, _req: &fuser::Request<'_>, ino: u64, nlookup: u64) {
@@ -99,18 +108,9 @@ impl Filesystem for FatFuse {
             return;
         };
 
-        let ref_count = inode.ref_count_mut();
+        // *ref_count = ref_count.saturating_sub(nlookup);
 
-        if *ref_count < nlookup {
-            debug!(
-                "tried to forget {} refs of inode {}, but ref_count is only {}",
-                nlookup, ino, *ref_count
-            );
-        }
-
-        *ref_count = ref_count.saturating_sub(nlookup);
-
-        if *ref_count == 0 {
+        if inode.refcount_dec(nlookup) == 0 {
             // no more references, drop inode
             self.drop_inode(ino);
         }
@@ -123,8 +123,28 @@ impl Filesystem for FatFuse {
         fh: Option<u64>,
         reply: fuser::ReplyAttr,
     ) {
-        warn!("[Not Implemented] getattr(ino: {:#x?}, fh: {:#x?})", ino, fh);
-        reply.error(ENOSYS);
+        // warn!("[Not Implemented] getattr(ino: {:#x?}, fh: {:#x?})", ino, fh);
+        // reply.error(ENOSYS);
+
+        let inode = if let Some(fh) = fh {
+            let Some(inode) = self.get_inode_by_fh(fh) else {
+                reply.error(EIO);
+
+                return;
+            };
+
+            inode
+        } else if let Some(inode) = self.get_inode(ino) {
+            inode
+        } else {
+            reply.error(EIO);
+
+            return;
+        };
+
+        let attr = inode.file_attr();
+
+        reply.attr(&TTL, &attr);
     }
 
     fn setattr(
@@ -232,27 +252,19 @@ impl Filesystem for FatFuse {
         reply.error(ENOSYS);
     }
 
-    fn link(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        newparent: u64,
-        newname: &std::ffi::OsStr,
-        reply: fuser::ReplyEntry,
-    ) {
-        debug!(
-            "[Not Implemented] link(ino: {:#x?}, newparent: {:#x?}, newname: {:?})",
-            ino, newparent, newname
-        );
-        reply.error(EPERM);
-    }
+    fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
+        if !self.inode_table.contains_key(&ino) {
+            reply.error(EINVAL);
+            return;
+        }
+
+        let fh = self.next_fh();
 
         if let Some(old_ino) = self.ino_by_fh.insert(fh, ino) {
             debug!("fh {} was associated with ino {}, now with ino {}", fh, old_ino, ino);
         }
 
-    fn open(&mut self, _req: &fuser::Request<'_>, _ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
-        reply.opened(0, 0);
+        reply.opened(fh, 0);
     }
 
     fn read(
@@ -343,11 +355,17 @@ impl Filesystem for FatFuse {
     fn opendir(
         &mut self,
         _req: &fuser::Request<'_>,
-        _ino: u64,
+        ino: u64,
         _flags: i32,
         reply: fuser::ReplyOpen,
     ) {
-        reply.opened(0, 0);
+        let fh = self.next_fh();
+
+        if let Some(old_ino) = self.ino_by_fh.insert(fh, ino) {
+            debug!("fh {} was already associated with ino {}, now with ino {}", fh, old_ino, ino);
+        }
+
+        reply.opened(fh, 0);
     }
 
     fn readdir(
@@ -356,10 +374,79 @@ impl Filesystem for FatFuse {
         ino: u64,
         fh: u64,
         offset: i64,
-        reply: fuser::ReplyDirectory,
+        mut reply: fuser::ReplyDirectory,
     ) {
-        warn!("[Not Implemented] readdir(ino: {:#x?}, fh: {}, offset: {})", ino, fh, offset);
-        reply.error(ENOSYS);
+        let Ok(mut offset): Result<usize, _> = offset.try_into() else {
+            return;
+        };
+
+        let Some(inode) = self.get_inode_by_fh(fh) else {
+            debug!("could not find inode accociated with fh {} (ino: {})", fh, ino);
+
+            reply.error(EINVAL);
+            return;
+        };
+
+        if inode.ino() != ino {
+            debug!(
+                "ino {} of inode associated with fh {} does not match given ino {}",
+                inode.ino(),
+                fh,
+                ino
+            );
+
+            reply.error(EINVAL);
+            return;
+        }
+
+        let mut _next_idx = 1;
+        let mut next_offset = || {
+            let next_idx = _next_idx;
+            _next_idx += 1;
+            next_idx
+        };
+
+        if inode.is_root() {
+            if offset == 0 {
+                debug!("adding . to root dir");
+                if reply.add(1, next_offset(), FileType::Directory, ".") {
+                    return;
+                }
+            } else {
+                offset -= 1;
+            }
+
+            if offset == 0 {
+                debug!("adding .. to root dir");
+                if reply.add(1, next_offset(), FileType::Directory, "..") {
+                    return;
+                }
+            } else {
+                offset -= 1;
+            }
+        }
+
+        let Ok(dir_iter) = inode.dir_iter(&self.fat_fs) else {
+            reply.error(ENOTDIR);
+            return;
+        };
+
+        // need to drop dir_iter here so we can borrow self mut again
+        // also skip over `offset` entries
+        let dirs: Vec<DirEntry> = dir_iter.skip(offset).collect();
+
+        for dir_entry in dirs {
+            let name = dir_entry.name_string().unwrap_or("<invalid>".into());
+
+            let inode: &Inode = self.get_or_make_inode_by_dir_entry(&dir_entry);
+
+            debug!("adding entry {} (ino: {})", name, inode.ino());
+            if reply.add(ino, next_offset(), inode.kind().into(), name) {
+                return;
+            }
+        }
+
+        reply.ok();
     }
 
     fn readdirplus(
@@ -380,11 +467,34 @@ impl Filesystem for FatFuse {
     fn releasedir(
         &mut self,
         _req: &fuser::Request<'_>,
-        _ino: u64,
-        _fh: u64,
+        ino: u64,
+        fh: u64,
         _flags: i32,
         reply: fuser::ReplyEmpty,
     ) {
+        let Some(ino) = self.ino_by_fh.remove(&fh) else {
+            debug!("can't find inode {} by fh {}", ino, fh);
+
+            reply.error(EIO);
+            return;
+        };
+
+        let Some(inode) = self.inode_table.get(&ino) else {
+            debug!("ino {} not associated with an inode", ino);
+
+            reply.ok();
+            return;
+        };
+
+        if inode.ino() != ino {
+            debug!(
+                "inode with ino {}, associated with fh {}, does not have expected ino {}",
+                inode.ino(),
+                fh,
+                ino
+            );
+        }
+
         reply.ok();
     }
 

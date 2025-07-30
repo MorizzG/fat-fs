@@ -6,6 +6,7 @@ use fat_bits::FatFs;
 use fat_bits::dir::DirEntry;
 use fuser::FileAttr;
 use libc::ENOTDIR;
+use log::debug;
 use rand::{Rng, SeedableRng as _};
 
 thread_local! {
@@ -91,7 +92,7 @@ impl Inode {
         ((secs as u32) << 16) | rand as u32
     }
 
-    pub fn new(fat_fs: &FatFs, dir_entry: DirEntry, ino: u64, uid: u32, gid: u32) -> Inode {
+    pub fn new(fat_fs: &FatFs, dir_entry: &DirEntry, ino: u64, uid: u32, gid: u32) -> Inode {
         assert!(dir_entry.is_file() || dir_entry.is_dir());
 
         let generation = Self::new_generation();
@@ -114,6 +115,12 @@ impl Inode {
         let mtime = datetime_to_system(dir_entry.write_time());
         let crtime = datetime_to_system(dir_entry.create_time());
 
+        debug!(
+            "creating new inode: ino: {}    name: {}",
+            ino,
+            dir_entry.name_string().unwrap_or("<invalid>".into())
+        );
+
         Inode {
             ino,
             generation,
@@ -131,6 +138,28 @@ impl Inode {
         }
     }
 
+    pub fn root_inode(fat_fs: &FatFs, uid: u32, gid: u32) -> Inode {
+        // let generation = Self::new_generation();
+
+        let root_cluster = fat_fs.bpb().root_cluster().unwrap_or(0);
+
+        Inode {
+            ino: 1,
+            generation: 0,
+            ref_count: 0,
+            size: 0,
+            block_size: fat_fs.bpb().bytes_per_sector() as u32,
+            kind: Kind::Dir,
+            read_only: false,
+            atime: SystemTime::UNIX_EPOCH,
+            mtime: SystemTime::UNIX_EPOCH,
+            crtime: SystemTime::UNIX_EPOCH,
+            uid,
+            gid,
+            first_cluster: root_cluster,
+        }
+    }
+
     pub fn ino(&self) -> u64 {
         self.ino
     }
@@ -143,12 +172,35 @@ impl Inode {
         self.ref_count
     }
 
-    pub fn ref_count_mut(&mut self) -> &mut u64 {
-        &mut self.ref_count
+    pub fn refcount_inc(&mut self) {
+        self.ref_count += 1;
+    }
+
+    pub fn refcount_dec(&mut self, n: u64) -> u64 {
+        if self.ref_count < n {
+            debug!(
+                "inode {}: tried to decrement refcount by {}, but is only {}",
+                self.ino(),
+                n,
+                self.ref_count
+            );
+        }
+
+        self.ref_count = self.ref_count.saturating_sub(n);
+
+        self.ref_count
+    }
+
+    pub fn kind(&self) -> Kind {
+        self.kind
     }
 
     pub fn first_cluster(&self) -> u32 {
         self.first_cluster
+    }
+
+    pub fn is_root(&self) -> bool {
+        self.ino == ROOT_INO
     }
 
     pub fn file_attr(&self) -> FileAttr {
@@ -180,7 +232,7 @@ impl Inode {
             return Err(ENOTDIR);
         }
 
-        if self.ino == ROOT_INO {
+        if self.is_root() {
             // root dir
 
             return Ok(fat_fs.root_dir_iter());
