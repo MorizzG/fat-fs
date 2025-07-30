@@ -3,6 +3,7 @@ use std::io::Read;
 
 use bitflags::bitflags;
 use chrono::{NaiveDate, NaiveDateTime, TimeDelta};
+use compact_str::CompactString;
 
 use crate::datetime::{Date, Time};
 use crate::utils::{load_u16_le, load_u32_le};
@@ -48,7 +49,7 @@ impl Display for Attr {
 /// represents an entry in a diectory
 #[derive(Debug)]
 pub struct DirEntry {
-    name: [u8; 11],
+    name: [u8; 13],
     attr: Attr,
 
     create_time_tenths: u8,
@@ -64,12 +65,13 @@ pub struct DirEntry {
 
     file_size: u32,
 
-    long_name: Option<String>,
+    checksum: u8,
+    long_name: Option<CompactString>,
 }
 
 impl Display for DirEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut name = self.name_string().unwrap_or_else(|| "<unknown>".to_owned());
+        let mut name = self.name_string().unwrap_or_else(|| "<unknown>".into());
 
         if self.attr.contains(Attr::Directory) {
             name.push('/');
@@ -89,11 +91,62 @@ impl Display for DirEntry {
 }
 
 impl DirEntry {
+    fn load_name(bytes: [u8; 11], attr: &Attr) -> [u8; 13] {
+        let mut name = [0; 13];
+
+        let mut iter = name.iter_mut();
+
+        if attr.contains(Attr::Hidden) && !attr.contains(Attr::VolumeId) {
+            // hidden file or folder
+            *iter.next().unwrap() = b'.';
+        }
+
+        fn truncate_trailing_spaces(mut bytes: &[u8]) -> &[u8] {
+            while bytes.last() == Some(&0x20) {
+                bytes = &bytes[..bytes.len() - 1];
+            }
+
+            bytes
+        }
+
+        let stem_bytes = truncate_trailing_spaces(&bytes[..8]);
+        let ext_bytes = truncate_trailing_spaces(&bytes[8..]);
+
+        for &c in stem_bytes {
+            let c = match c {
+                // reject non-ascii
+                // TODO: implement code pages? probably not...
+                c if c >= 128 => b'?',
+                c => c,
+            };
+
+            *iter.next().unwrap() = c;
+        }
+
+        if !ext_bytes.is_empty() {
+            *iter.next().unwrap() = b'.';
+
+            for &c in ext_bytes {
+                let c = match c {
+                    // reject non-ascii
+                    // TODO: implement code pages? probably not...
+                    c if c >= 128 => b'?',
+                    c => c,
+                };
+
+                *iter.next().unwrap() = c;
+            }
+        }
+
+        name
+    }
+
     pub fn load(bytes: &[u8]) -> anyhow::Result<DirEntry> {
         assert_eq!(bytes.len(), 32);
 
-        let name = bytes[..11].try_into().unwrap();
         let attr = Attr::from_bits_truncate(bytes[11]);
+
+        let name = Self::load_name(bytes[..11].try_into().unwrap(), &attr);
 
         let create_time_tenths = bytes[13];
         anyhow::ensure!(
@@ -142,6 +195,7 @@ impl DirEntry {
             write_date,
             file_size,
             long_name: None,
+            checksum: Self::checksum(&bytes[..11]),
         })
     }
 
@@ -173,8 +227,6 @@ impl DirEntry {
             return false;
         }
 
-        // &self.name[..2] == &[b'.', b' ']
-
         self.name[0] == b'.' && &self.name[1..] == &[b' '; 10]
     }
 
@@ -182,8 +234,6 @@ impl DirEntry {
         if !self.is_dir() {
             return false;
         }
-
-        // &self.name[..3] == &[b'.', b'.', b' ']
 
         &self.name[..2] == &[b'.', b'.'] && &self.name[2..] == &[b' '; 9]
     }
@@ -216,15 +266,18 @@ impl DirEntry {
         std::str::from_utf8(self.extension()).ok()
     }
 
-    pub fn name_string(&self) -> Option<String> {
+    pub fn name_string(&self) -> Option<CompactString> {
+        // use a CompactString here to allow inlining of short names
+        // maybe switch to a Cow instead? has disadvantage that we need to alloc for short names
+
         if let Some(long_filename) = self.long_name() {
-            return Some(long_filename.to_owned());
+            return Some(long_filename.into());
         }
 
         let name = std::str::from_utf8(&self.name[..8]).ok()?.trim_ascii_end();
         let ext = std::str::from_utf8(&self.name[8..]).ok()?.trim_ascii_end();
 
-        let mut s = String::new();
+        let mut s = CompactString::const_new("");
 
         if self.attr.contains(Attr::Hidden) {
             s.push('.');
@@ -245,7 +298,7 @@ impl DirEntry {
         self.long_name.as_deref()
     }
 
-    pub fn set_long_name(&mut self, long_name: String) {
+    pub fn set_long_name(&mut self, long_name: CompactString) {
         self.long_name = Some(long_name);
     }
 
@@ -283,10 +336,10 @@ impl DirEntry {
         self.file_size
     }
 
-    pub fn checksum(&self) -> u8 {
+    pub fn checksum(name: &[u8]) -> u8 {
         let mut checksum: u8 = 0;
 
-        for &x in self.name() {
+        for &x in name {
             checksum = checksum.rotate_right(1).wrapping_add(x);
         }
 
@@ -482,9 +535,6 @@ impl LongFilenameBuf {
 pub struct DirIter<R: Read> {
     reader: R,
 
-    // long_filename_rev_buf: Vec<u16>,
-    // long_filename_checksum: Option<u8>,
-    // long_filename_last_ordinal: Option<u8>,
     long_filename_buf: LongFilenameBuf,
 }
 
@@ -492,9 +542,6 @@ impl<R: Read> DirIter<R> {
     pub fn new(reader: R) -> DirIter<R> {
         DirIter {
             reader,
-            // long_filename_rev_buf: Vec::new(),
-            // long_filename_checksum: None,
-            // long_filename_last_ordinal: None,
             long_filename_buf: Default::default(),
         }
     }
@@ -503,13 +550,9 @@ impl<R: Read> DirIter<R> {
     fn next_impl(&mut self) -> anyhow::Result<Option<DirEntry>> {
         let mut chunk = [0; 32];
         if self.reader.read_exact(&mut chunk).is_err() {
-            // reading failed; nothing we can do here
+            // nothing we can do here since we might be in an invalid state after a partial read
             return Ok(None);
         }
-
-        // let Ok(dir_entry) = DirEntry::load(&chunk) else {
-        //     return self.next();
-        // };
 
         let dir_entry = DirEntryWrapper::load(&chunk)
             .map_err(|e| anyhow::anyhow!("failed to load dir entry: {e}"))?;
@@ -534,25 +577,23 @@ impl<R: Read> DirIter<R> {
             return self.next_impl();
         }
 
-        match self
+        if let Some(iter) = self
             .long_filename_buf
-            .get_buf(dir_entry.checksum())
+            .get_buf(dir_entry.checksum)
             .map_err(|e| {
                 anyhow::anyhow!(
                     "failed to get long filename for {}: {}",
                     dir_entry.name_string().as_deref().unwrap_or("<invalid>"),
                     e
                 )
-            })? {
-            Some(iter) => {
-                // attach long filename to dir_entry
+            })?
+        {
+            // attach long filename to dir_entry
 
-                let long_filename: String =
-                    char::decode_utf16(iter).filter_map(|x| x.ok()).collect();
+            let long_filename: CompactString =
+                char::decode_utf16(iter).filter_map(|x| x.ok()).collect();
 
-                dir_entry.set_long_name(long_filename);
-            }
-            None => {} // no long filename -> do nothing
+            dir_entry.set_long_name(long_filename);
         }
 
         self.long_filename_buf.reset();
@@ -568,6 +609,7 @@ impl<R: Read> Iterator for DirIter<R> {
         match self.next_impl() {
             Ok(x) => x,
             Err(e) => {
+                // print error message, try next
                 eprintln!("{}", e);
 
                 self.next()

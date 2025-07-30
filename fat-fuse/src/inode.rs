@@ -3,8 +3,9 @@ use std::time::SystemTime;
 
 use chrono::{NaiveDateTime, NaiveTime};
 use fat_bits::FatFs;
-use fat_bits::dir::{DirEntry, DirIter};
+use fat_bits::dir::DirEntry;
 use fuser::FileAttr;
+use libc::ENOTDIR;
 use rand::{Rng, SeedableRng as _};
 
 thread_local! {
@@ -19,7 +20,10 @@ thread_local! {
 static RNG: LazyCell<RefCell<rand::rngs::SmallRng>> = LazyCell::new(|| RefCell::new(rand::rngs::SmallRng::from_os_rng()));
 }
 
-fn get_random_u32() -> u32 {
+fn get_random<T>() -> T
+where
+    rand::distr::StandardUniform: rand::distr::Distribution<T>,
+{
     // RNG.with(|x| unsafe {
     //     let rng = &mut (*x.get());
 
@@ -50,7 +54,11 @@ const ROOT_INO: u64 = 1;
 #[allow(dead_code)]
 pub struct Inode {
     ino: u64,
+    // FUSE uses a u64 for generation, but the Linux kernel only handles u32s anyway, truncating
+    // the high bits, so using more is pretty pointless and possibly even detrimental
     generation: u32,
+
+    ref_count: u64,
 
     size: u64,
     block_size: u32,
@@ -72,10 +80,21 @@ pub struct Inode {
 
 #[allow(dead_code)]
 impl Inode {
-    pub fn new(fat_fs: &FatFs, dir_entry: DirEntry, uid: u32, gid: u32) -> Inode {
+    fn new_generation() -> u32 {
+        let rand: u16 = get_random();
+
+        let secs = SystemTime::UNIX_EPOCH
+            .elapsed()
+            .map(|dur| dur.as_secs() as u16)
+            .unwrap_or(0);
+
+        ((secs as u32) << 16) | rand as u32
+    }
+
+    pub fn new(fat_fs: &FatFs, dir_entry: DirEntry, ino: u64, uid: u32, gid: u32) -> Inode {
         assert!(dir_entry.is_file() || dir_entry.is_dir());
 
-        let generation = get_random_u32();
+        let generation = Self::new_generation();
 
         let kind = if dir_entry.is_dir() {
             Kind::Dir
@@ -96,8 +115,9 @@ impl Inode {
         let crtime = datetime_to_system(dir_entry.create_time());
 
         Inode {
-            ino: dir_entry.first_cluster() as u64,
+            ino,
             generation,
+            ref_count: 0,
             size: dir_entry.file_size() as u64,
             block_size: fat_fs.bpb().bytes_per_sector() as u32,
             kind,
@@ -109,6 +129,26 @@ impl Inode {
             gid,
             first_cluster: dir_entry.first_cluster(),
         }
+    }
+
+    pub fn ino(&self) -> u64 {
+        self.ino
+    }
+
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    pub fn ref_count(&self) -> u64 {
+        self.ref_count
+    }
+
+    pub fn ref_count_mut(&mut self) -> &mut u64 {
+        &mut self.ref_count
+    }
+
+    pub fn first_cluster(&self) -> u32 {
+        self.first_cluster
     }
 
     pub fn file_attr(&self) -> FileAttr {
@@ -133,11 +173,12 @@ impl Inode {
         }
     }
 
-    pub fn dir_iter(&self, fat_fs: &FatFs) -> anyhow::Result<impl Iterator<Item = DirEntry>> {
-        anyhow::ensure!(self.kind == Kind::Dir, "cannot dir_iter on a file");
+    pub fn dir_iter(&self, fat_fs: &FatFs) -> Result<impl Iterator<Item = DirEntry>, i32> {
+        // anyhow::ensure!(self.kind == Kind::Dir, "cannot dir_iter on a file");
 
-        // TODO: the boxing here is not particularly pretty, but neccessary, since the DirIter for
-        // the root holds a
+        if self.kind != Kind::Dir {
+            return Err(ENOTDIR);
+        }
 
         if self.ino == ROOT_INO {
             // root dir
@@ -145,9 +186,6 @@ impl Inode {
             return Ok(fat_fs.root_dir_iter());
         }
 
-        let chain_reader = fat_fs.chain_reader(self.first_cluster);
-
-        // TODO: get rid of this Box if the boxing is removed from root_dir_iter
-        Ok(DirIter::new(Box::new(chain_reader)))
+        Ok(fat_fs.dir_iter(self.first_cluster))
     }
 }

@@ -1,11 +1,13 @@
 use std::ffi::c_int;
 use std::time::Duration;
 
+use fat_bits::dir::DirEntry;
 use fuser::Filesystem;
-use libc::{EIO, ENOENT, ENOSYS, ENOTDIR, EPERM};
+use libc::{EIO, ENOENT, ENOSYS, EPERM};
 use log::{debug, warn};
 
 use crate::FatFuse;
+use crate::inode::Inode;
 
 impl Filesystem for FatFuse {
     fn init(
@@ -28,35 +30,91 @@ impl Filesystem for FatFuse {
         // warn!("[Not Implemented] lookup(parent: {:#x?}, name {:?})", parent, name);
         // reply.error(ENOSYS);
 
-        let parent_inode = if let Some(inode) = self.get_inode(parent) {
-            inode
-        } else {
+        let Some(name) = name.to_str() else {
+            // TODO: add proper handling of non-utf8 strings
+            reply.error(ENOSYS);
+            return;
+        };
+
+        let Some(parent_inode) = self.get_inode(parent) else {
             // parent inode does not exist
-            // TODO: how can we make sure this does not exist?
-            // panic?
+            // TODO: how can we make sure this does not happed?
+            // TODO: panic?
             reply.error(EIO);
 
             return;
         };
 
-        let Ok(dir_iter) = parent_inode.dir_iter(&self.fat_fs) else {
-            reply.error(ENOTDIR);
-            return;
+        // let Ok(mut dir_iter) = parent_inode.dir_iter(&self.fat_fs) else {
+        //     reply.error(ENOTDIR);
+        //     return;
+        // };
+
+        // let Some(dir_entry) =
+        //     dir_iter.find(|dir_entry| dir_entry.name_string().as_deref() == Some(name))
+        // else {
+        //     reply.error(ENOENT);
+        //     return;
+        // };
+
+        let dir_entry: DirEntry = match parent_inode
+            .dir_iter(&self.fat_fs)
+            // .map_err(|_| ENOTDIR)
+            .and_then(|mut dir_iter| {
+                dir_iter
+                    .find(|dir_entry| dir_entry.name_string().as_deref() == Some(name))
+                    .ok_or(ENOENT)
+            }) {
+            Ok(dir_entry) => dir_entry,
+            Err(err) => {
+                reply.error(err);
+
+                return;
+            }
         };
 
-        let Some(dir_entry) =
-            dir_iter.find(|dir_entry| dir_entry.name_str().as_deref() == Some(""))
-        else {
-            reply.error(ENOENT);
-            return;
+        let inode = match self.get_inode_by_first_cluster(dir_entry.first_cluster()) {
+            Some(inode) => inode,
+            None => {
+                // no inode found, make a new one
+
+                let ino = self.next_ino();
+
+                let inode = Inode::new(&self.fat_fs, dir_entry, ino, self.uid, self.gid);
+
+                self.insert_inode(inode)
+            }
         };
 
-        reply.entry(&Duration::from_secs(1), attr, generation);
+        let attr = inode.file_attr();
+        let generation = inode.generation();
 
-        todo!();
+        reply.entry(&Duration::from_secs(1), &attr, generation as u64);
     }
 
-    fn forget(&mut self, _req: &fuser::Request<'_>, _ino: u64, _nlookup: u64) {}
+    fn forget(&mut self, _req: &fuser::Request<'_>, ino: u64, nlookup: u64) {
+        let Some(inode) = self.get_inode_mut(ino) else {
+            debug!("tried to forget {} refs of inode {}, but was not found", ino, nlookup);
+
+            return;
+        };
+
+        let ref_count = inode.ref_count_mut();
+
+        if *ref_count < nlookup {
+            debug!(
+                "tried to forget {} refs of inode {}, but ref_count is only {}",
+                nlookup, ino, *ref_count
+            );
+        }
+
+        *ref_count = ref_count.saturating_sub(nlookup);
+
+        if *ref_count == 0 {
+            // no more references, drop inode
+            self.drop_inode(ino);
+        }
+    }
 
     fn getattr(
         &mut self,

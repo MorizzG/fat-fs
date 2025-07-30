@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use fat_bits::FatFs;
-use fat_bits::dir::{DirEntry, DirIter};
+use fat_bits::dir::DirEntry;
 use fat_bits::fat::Fatty as _;
 
 pub fn main() -> anyhow::Result<()> {
