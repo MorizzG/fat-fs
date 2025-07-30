@@ -185,12 +185,28 @@ impl FatFs {
     }
 
     pub fn cluster_as_subslice_mut(&mut self, cluster: u32) -> SubSliceMut<'_> {
+        if cluster == 0 {
+            // for cluster 0 simply return empty subslice
+            // this makes things a bit easier, since cluster 0 is used as a marker that a file/dir
+            // is empty
+
+            SubSliceMut::new(self, 0, 0);
+        }
+
         let offset = self.data_cluster_to_offset(cluster);
 
         SubSliceMut::new(self, offset, self.bytes_per_cluster)
     }
 
     pub fn cluster_as_subslice(&self, cluster: u32) -> SubSlice<'_> {
+        if cluster == 0 {
+            // for cluster 0 simply return empty subslice
+            // this makes things a bit easier, since cluster 0 is used as a marker that a file/dir
+            // is empty
+
+            SubSlice::new(self, 0, 0);
+        }
+
         let offset = self.data_cluster_to_offset(cluster);
 
         SubSlice::new(self, offset, self.bytes_per_cluster)
