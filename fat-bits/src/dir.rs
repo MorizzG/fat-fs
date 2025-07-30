@@ -469,6 +469,13 @@ impl LongFilenameBuf {
                 name = &name[..name.len() - 1];
             }
 
+            if name.last() == Some(&0) {
+                name = &name[..name.len() - 1];
+            } else {
+                // no null terminator only for names that are multiples of 13, i.e. perfectly fit
+                assert_eq!(name.len(), 13);
+            }
+
             assert!(!name.is_empty());
 
             self.extend_name(name);
