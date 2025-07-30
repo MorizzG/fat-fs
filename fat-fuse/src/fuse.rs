@@ -214,21 +214,6 @@ impl Filesystem for FatFuse {
         reply.error(ENOSYS);
     }
 
-    fn symlink(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        parent: u64,
-        link_name: &std::ffi::OsStr,
-        target: &std::path::Path,
-        reply: fuser::ReplyEntry,
-    ) {
-        debug!(
-            "[Not Implemented] symlink(parent: {:#x?}, link_name: {:?}, target: {:?})",
-            parent, link_name, target,
-        );
-        reply.error(EPERM);
-    }
-
     fn rename(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -261,6 +246,10 @@ impl Filesystem for FatFuse {
         );
         reply.error(EPERM);
     }
+
+        if let Some(old_ino) = self.ino_by_fh.insert(fh, ino) {
+            debug!("fh {} was associated with ino {}, now with ino {}", fh, old_ino, ino);
+        }
 
     fn open(&mut self, _req: &fuser::Request<'_>, _ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
         reply.opened(0, 0);
@@ -418,62 +407,6 @@ impl Filesystem for FatFuse {
         reply.statfs(0, 0, 0, 0, 0, 512, 255, 0);
     }
 
-    fn setxattr(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        name: &std::ffi::OsStr,
-        _value: &[u8],
-        flags: i32,
-        position: u32,
-        reply: fuser::ReplyEmpty,
-    ) {
-        debug!(
-            "[Not Implemented] setxattr(ino: {:#x?}, name: {:?}, flags: {:#x?}, position: {})",
-            ino, name, flags, position
-        );
-        reply.error(ENOSYS);
-    }
-
-    fn getxattr(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        name: &std::ffi::OsStr,
-        size: u32,
-        reply: fuser::ReplyXattr,
-    ) {
-        debug!("[Not Implemented] getxattr(ino: {:#x?}, name: {:?}, size: {})", ino, name, size);
-        reply.error(ENOSYS);
-    }
-
-    fn listxattr(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        size: u32,
-        reply: fuser::ReplyXattr,
-    ) {
-        debug!("[Not Implemented] listxattr(ino: {:#x?}, size: {})", ino, size);
-        reply.error(ENOSYS);
-    }
-
-    fn removexattr(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        name: &std::ffi::OsStr,
-        reply: fuser::ReplyEmpty,
-    ) {
-        debug!("[Not Implemented] removexattr(ino: {:#x?}, name: {:?})", ino, name);
-        reply.error(ENOSYS);
-    }
-
-    fn access(&mut self, _req: &fuser::Request<'_>, ino: u64, mask: i32, reply: fuser::ReplyEmpty) {
-        debug!("[Not Implemented] access(ino: {:#x?}, mask: {})", ino, mask);
-        reply.error(ENOSYS);
-    }
-
     fn create(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -492,104 +425,6 @@ impl Filesystem for FatFuse {
         reply.error(ENOSYS);
     }
 
-    fn getlk(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        fh: u64,
-        lock_owner: u64,
-        start: u64,
-        end: u64,
-        typ: i32,
-        pid: u32,
-        reply: fuser::ReplyLock,
-    ) {
-        debug!(
-            "[Not Implemented] getlk(ino: {:#x?}, fh: {}, lock_owner: {}, start: {}, \
-            end: {}, typ: {}, pid: {})",
-            ino, fh, lock_owner, start, end, typ, pid
-        );
-        reply.error(ENOSYS);
-    }
-
-    fn setlk(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        fh: u64,
-        lock_owner: u64,
-        start: u64,
-        end: u64,
-        typ: i32,
-        pid: u32,
-        sleep: bool,
-        reply: fuser::ReplyEmpty,
-    ) {
-        debug!(
-            "[Not Implemented] setlk(ino: {:#x?}, fh: {}, lock_owner: {}, start: {}, \
-            end: {}, typ: {}, pid: {}, sleep: {})",
-            ino, fh, lock_owner, start, end, typ, pid, sleep
-        );
-        reply.error(ENOSYS);
-    }
-
-    fn bmap(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        blocksize: u32,
-        idx: u64,
-        reply: fuser::ReplyBmap,
-    ) {
-        debug!(
-            "[Not Implemented] bmap(ino: {:#x?}, blocksize: {}, idx: {})",
-            ino, blocksize, idx,
-        );
-        reply.error(ENOSYS);
-    }
-
-    fn ioctl(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        fh: u64,
-        flags: u32,
-        cmd: u32,
-        in_data: &[u8],
-        out_size: u32,
-        reply: fuser::ReplyIoctl,
-    ) {
-        debug!(
-            "[Not Implemented] ioctl(ino: {:#x?}, fh: {}, flags: {}, cmd: {}, \
-            in_data.len(): {}, out_size: {})",
-            ino,
-            fh,
-            flags,
-            cmd,
-            in_data.len(),
-            out_size,
-        );
-        reply.error(ENOSYS);
-    }
-
-    fn fallocate(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        length: i64,
-        mode: i32,
-        reply: fuser::ReplyEmpty,
-    ) {
-        debug!(
-            "[Not Implemented] fallocate(ino: {:#x?}, fh: {}, offset: {}, \
-            length: {}, mode: {})",
-            ino, fh, offset, length, mode
-        );
-        reply.error(ENOSYS);
-    }
-
     fn lseek(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -602,28 +437,6 @@ impl Filesystem for FatFuse {
         debug!(
             "[Not Implemented] lseek(ino: {:#x?}, fh: {}, offset: {}, whence: {})",
             ino, fh, offset, whence
-        );
-        reply.error(ENOSYS);
-    }
-
-    fn copy_file_range(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino_in: u64,
-        fh_in: u64,
-        offset_in: i64,
-        ino_out: u64,
-        fh_out: u64,
-        offset_out: i64,
-        len: u64,
-        flags: u32,
-        reply: fuser::ReplyWrite,
-    ) {
-        debug!(
-            "[Not Implemented] copy_file_range(ino_in: {:#x?}, fh_in: {}, \
-            offset_in: {}, ino_out: {:#x?}, fh_out: {}, offset_out: {}, \
-            len: {}, flags: {})",
-            ino_in, fh_in, offset_in, ino_out, fh_out, offset_out, len, flags
         );
         reply.error(ENOSYS);
     }
