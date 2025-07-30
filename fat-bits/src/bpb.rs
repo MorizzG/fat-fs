@@ -236,6 +236,7 @@ impl Bpb {
         if self.fat_type() == FatType::Fat32 {
             return None;
         }
+
         Some(self.fat_offset() + self.sector_to_offset(self.num_fats() as u32 * self.fat_size()))
     }
 

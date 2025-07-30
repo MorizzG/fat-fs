@@ -15,7 +15,7 @@ fn main() -> anyhow::Result<()> {
 
     let file = File::open(path)?;
 
-    let fat_fuse = FatFuse::new(Rc::new(RefCell::new(file)))?;
+    let fat_fuse = FatFuse::new(file)?;
 
     let options = vec![
         MountOption::RO,

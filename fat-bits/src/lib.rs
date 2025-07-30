@@ -98,8 +98,15 @@ pub struct FatFs {
     fat: fat::Fat,
 }
 
+unsafe impl Send for FatFs {}
+
 impl FatFs {
-    pub fn load(data: Rc<RefCell<dyn SliceLike>>) -> anyhow::Result<FatFs> {
+    pub fn load<S>(data: S) -> anyhow::Result<FatFs>
+    where
+        S: SliceLike + Send + 'static,
+    {
+        let data = Rc::new(RefCell::new(data));
+
         let mut bpb_bytes = [0; 512];
 
         data.borrow_mut().read_at_offset(0, &mut bpb_bytes)?;

@@ -26,7 +26,10 @@ pub struct FatFuse {
 }
 
 impl FatFuse {
-    pub fn new(data: Rc<RefCell<dyn SliceLike>>) -> anyhow::Result<FatFuse> {
+    pub fn new<S>(data: S) -> anyhow::Result<FatFuse>
+    where
+        S: SliceLike + Send + 'static,
+    {
         let uid = unsafe { libc::getuid() };
         let gid = unsafe { libc::getgid() };
 

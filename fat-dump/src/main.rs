@@ -22,7 +22,7 @@ pub fn main() -> anyhow::Result<()> {
 
     // println!("{}", bpb);
 
-    let fat_fs = FatFs::load(Rc::new(RefCell::new(file)))?;
+    let fat_fs = FatFs::load(file)?;
 
     println!("{}", fat_fs.bpb());
     println!();
