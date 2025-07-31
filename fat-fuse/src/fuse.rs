@@ -20,7 +20,18 @@ impl Filesystem for FatFuse {
         Ok(())
     }
 
-    fn destroy(&mut self) {}
+    fn destroy(&mut self) {
+        debug!("inode_table: {}", self.inode_table.len());
+
+        debug!("ino_by_first_cluster: {}", self.ino_by_first_cluster.len());
+        for (&first_cluster, &ino) in self.ino_by_first_cluster.iter() {
+            debug!("{} -> {}", first_cluster, ino);
+        }
+
+        debug!("ino_by_fh: {}", self.ino_by_fh.len());
+
+        debug!("ino_by_path: {}", self.ino_by_path.len());
+    }
 
     fn lookup(
         &mut self,

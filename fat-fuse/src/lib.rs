@@ -28,21 +28,6 @@ pub struct FatFuse {
     ino_by_path: FxHashMap<Rc<str>, u64>,
 }
 
-impl Drop for FatFuse {
-    fn drop(&mut self) {
-        println!("inode_table: {}", self.inode_table.len());
-
-        println!("ino_by_first_cluster: {}", self.ino_by_first_cluster.len());
-        for (&first_cluster, &ino) in self.ino_by_first_cluster.iter() {
-            println!("{} -> {}", first_cluster, ino);
-        }
-
-        println!("ino_by_fh: {}", self.ino_by_fh.len());
-
-        println!("ino_by_path: {}", self.ino_by_path.len());
-    }
-}
-
 /// SAFETY
 ///
 /// do NOT leak Rc<str> from this type

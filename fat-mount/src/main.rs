@@ -34,7 +34,5 @@ fn main() -> anyhow::Result<()> {
 
     rx.recv().unwrap();
 
-    println!("done");
-
     Ok(())
 }
