@@ -30,9 +30,11 @@ fn main() -> anyhow::Result<()> {
     })
     .unwrap();
 
-    let _handle = fuser::spawn_mount2(fat_fuse, mountpoint, &options)?;
+    let handle = fuser::spawn_mount2(fat_fuse, mountpoint, &options)?;
 
     rx.recv().unwrap();
+
+    handle.join();
 
     Ok(())
 }

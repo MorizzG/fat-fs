@@ -11,7 +11,7 @@ mod datetime;
 pub mod dir;
 pub mod fat;
 pub mod fs_info;
-mod iter;
+pub mod iter;
 mod subslice;
 mod utils;
 
@@ -240,7 +240,7 @@ impl FatFs {
         Ok(data)
     }
 
-    fn chain_reader(&self, first_cluster: u32) -> impl Read {
+    fn chain_reader(&'_ self, first_cluster: u32) -> iter::ClusterChainReader<'_> {
         iter::ClusterChainReader::new(self, first_cluster)
     }
 
@@ -273,5 +273,11 @@ impl FatFs {
         let cluster_iter = self.chain_reader(first_cluster);
 
         DirIter::new(Box::new(cluster_iter))
+    }
+
+    pub fn file_reader(&self, first_cluster: u32) -> iter::ClusterChainReader<'_> {
+        assert!(first_cluster >= 2);
+
+        self.chain_reader(first_cluster)
     }
 }

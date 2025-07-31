@@ -5,8 +5,9 @@ use std::time::SystemTime;
 use chrono::{NaiveDateTime, NaiveTime};
 use fat_bits::FatFs;
 use fat_bits::dir::DirEntry;
+use fat_bits::iter::ClusterChainReader;
 use fuser::FileAttr;
-use libc::ENOTDIR;
+use libc::{EISDIR, ENOTDIR};
 use log::debug;
 use rand::{Rng, SeedableRng as _};
 
@@ -232,6 +233,14 @@ impl Inode {
         self.kind
     }
 
+    pub fn is_file(&self) -> bool {
+        self.kind == Kind::File
+    }
+
+    pub fn is_dir(&self) -> bool {
+        self.kind == Kind::Dir
+    }
+
     pub fn first_cluster(&self) -> u32 {
         self.first_cluster
     }
@@ -280,5 +289,13 @@ impl Inode {
         }
 
         Ok(fat_fs.dir_iter(self.first_cluster))
+    }
+
+    pub fn file_reader<'a>(&'a self, fat_fs: &'a FatFs) -> Result<ClusterChainReader<'a>, i32> {
+        if self.is_dir() {
+            return Err(EISDIR);
+        }
+
+        Ok(fat_fs.file_reader(self.first_cluster()))
     }
 }

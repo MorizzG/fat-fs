@@ -104,15 +104,20 @@ impl SubSlice<'_> {
         self.fat_fs
     }
 
-    pub fn fat_fs_mut(&self) -> &FatFs {
-        self.fat_fs
-    }
-
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    pub fn skip(&mut self, n: usize) -> usize {
+        let n = n.min(self.len());
+
+        self.offset += n as u64;
+        self.len -= n;
+
+        n
     }
 }
 

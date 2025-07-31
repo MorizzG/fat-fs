@@ -22,7 +22,7 @@ impl<'a> ClusterChainReader<'a> {
         }
     }
 
-    fn next_cluster(&mut self) -> bool {
+    fn move_to_next_cluster(&mut self) -> bool {
         let Some(next_cluster) = self.next_cluster else {
             return false;
         };
@@ -37,12 +37,33 @@ impl<'a> ClusterChainReader<'a> {
 
         true
     }
+
+    pub fn skip(&mut self, n: u64) -> u64 {
+        let mut bytes_to_skip = n;
+
+        while bytes_to_skip > self.sub_slice.len() as u64 {
+            bytes_to_skip -= self.sub_slice.len() as u64;
+            if !self.move_to_next_cluster() {
+                // ran out of bytes to seek
+                return n - bytes_to_skip;
+            }
+        }
+
+        if bytes_to_skip != 0 {
+            bytes_to_skip -= self.sub_slice.skip(bytes_to_skip as usize) as u64;
+        }
+
+        // n should absolutely be zero here
+        assert_eq!(bytes_to_skip, 0);
+
+        n
+    }
 }
 
-impl<'a> Read for ClusterChainReader<'a> {
+impl Read for ClusterChainReader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         if self.sub_slice.is_empty() {
-            if !self.next_cluster() {
+            if !self.move_to_next_cluster() {
                 return Ok(0);
             }
         }

@@ -1,11 +1,12 @@
 use std::ffi::c_int;
+use std::io::Read;
 use std::rc::Rc;
 use std::time::Duration;
 
 use fat_bits::dir::DirEntry;
 use fuser::{FileType, Filesystem};
-use libc::{EINVAL, EIO, ENOENT, ENOSYS, ENOTDIR};
-use log::{debug, warn};
+use libc::{EBADF, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR};
+use log::{debug, error};
 
 use crate::{FatFuse, Inode};
 
@@ -281,6 +282,8 @@ impl Filesystem for FatFuse {
             debug!("fh {} was associated with ino {}, now with ino {}", fh, old_ino, ino);
         }
 
+        debug!("opened inode {}: fh {}", ino, fh);
+
         reply.opened(fh, 0);
     }
 
@@ -291,16 +294,74 @@ impl Filesystem for FatFuse {
         fh: u64,
         offset: i64,
         size: u32,
-        flags: i32,
-        lock_owner: Option<u64>,
+        _flags: i32,
+        _lock_owner: Option<u64>,
         reply: fuser::ReplyData,
     ) {
-        warn!(
-            "[Not Implemented] read(ino: {:#x?}, fh: {}, offset: {}, size: {}, \
-            flags: {:#x?}, lock_owner: {:?})",
-            ino, fh, offset, size, flags, lock_owner
-        );
-        reply.error(ENOSYS);
+        // warn!(
+        //     "[Not Implemented] read(ino: {:#x?}, fh: {}, offset: {}, size: {}, \
+        //     flags: {:#x?}, lock_owner: {:?})",
+        //     ino, fh, offset, size, flags, lock_owner
+        // );
+        // reply.error(ENOSYS);
+
+        if offset < 0 {
+            debug!("tried to read with negative offset {offset}");
+
+            reply.error(EINVAL);
+            return;
+        }
+
+        let offset = offset as u64;
+
+        let Some(inode) = self.get_inode_by_fh(fh) else {
+            debug!("fh {fh} is not associated by any inode");
+
+            reply.error(EBADF);
+            return;
+        };
+
+        if inode.ino() != ino {
+            debug!("fh {fh} is associated with inode {} instead of {ino}", inode.ino());
+
+            reply.error(EIO);
+            return;
+        }
+
+        if !inode.is_file() {
+            debug!("tried to use read on directory {ino}");
+
+            reply.error(EISDIR);
+            return;
+        }
+
+        let mut reader = match inode.file_reader(&self.fat_fs) {
+            Ok(reader) => reader,
+            Err(err) => {
+                reply.error(err);
+                return;
+            }
+        };
+
+        if reader.skip(offset) != offset {
+            // reader is exhausted, bail
+            reply.data(&[]);
+            return;
+        }
+
+        let mut buf = vec![0; size as usize];
+
+        let n = match reader.read(&mut buf) {
+            Ok(n) => n,
+            Err(err) => {
+                error!("error while reading: {err}");
+
+                reply.error(EIO);
+                return;
+            }
+        };
+
+        reply.data(&buf[..n]);
     }
 
     fn write(
@@ -347,13 +408,27 @@ impl Filesystem for FatFuse {
     fn release(
         &mut self,
         _req: &fuser::Request<'_>,
-        _ino: u64,
-        _fh: u64,
+        ino: u64,
+        fh: u64,
         _flags: i32,
         _lock_owner: Option<u64>,
         _flush: bool,
         reply: fuser::ReplyEmpty,
     ) {
+        let Some(found_ino) = self.ino_by_fh.remove(&fh) else {
+            debug!("tried to release fh {fh} with ino {ino}, but no ino was found in mapping");
+
+            reply.error(EINVAL);
+            return;
+        };
+
+        if found_ino != ino {
+            debug!("tried to release fh {fh} with ino {ino}, but found ino is {found_ino} instead");
+
+            reply.error(EIO);
+            return;
+        }
+
         reply.ok();
     }
 
