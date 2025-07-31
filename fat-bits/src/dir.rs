@@ -71,7 +71,7 @@ pub struct DirEntry {
 
 impl Display for DirEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut name = self.name_string().unwrap_or_else(|| "<unknown>".into());
+        let mut name = self.name_string();
 
         if self.attr.contains(Attr::Directory) {
             name.push('/');
@@ -266,16 +266,19 @@ impl DirEntry {
         std::str::from_utf8(self.extension()).ok()
     }
 
-    pub fn name_string(&self) -> Option<CompactString> {
+    pub fn name_string(&self) -> CompactString {
         // use a CompactString here to allow inlining of short names
         // maybe switch to a Cow instead? has disadvantage that we need to alloc for short names
 
+        // can't be empty
+        assert!(!self.is_empty());
+
         if let Some(long_filename) = self.long_name() {
-            return Some(long_filename.into());
+            return long_filename.into();
         }
 
-        let name = std::str::from_utf8(&self.name[..8]).ok()?.trim_ascii_end();
-        let ext = std::str::from_utf8(&self.name[8..]).ok()?.trim_ascii_end();
+        let name = &self.name[..8];
+        let ext = &self.name[8..];
 
         let mut s = CompactString::const_new("");
 
@@ -283,15 +286,50 @@ impl DirEntry {
             s.push('.');
         }
 
-        s += name;
+        // s += name;
+
+        // for &c in self.name[..8].trim_ascii_end() {
+        //     // stem
+
+        //     if !c.is_ascii()
+        //         || c < 0x20
+        //         || !(c.is_ascii_alphanumeric() || VALID_SYMBOLS.contains(&c))
+        //     {
+        //         // replace invalid character
+        //         // characters above 127 are also ignored, even tho allowed
+        //         s.push('?');
+
+        //         continue;
+        //     }
+
+        //     s.push(c as char);
+        // }
+
+        const VALID_SYMBOLS: &[u8] = &[
+            b'$', b'%', b'\'', b'-', b'_', b'@', b'~', b'`', b'!', b'(', b')', b'{', b'}', b'^',
+            b'#', b'&',
+        ];
+
+        fn map_chars(c: u8) -> char {
+            if !c.is_ascii()
+                || c < 0x20
+                || !(c.is_ascii_alphanumeric() || VALID_SYMBOLS.contains(&c))
+            {
+                '?'
+            } else {
+                c as char
+            }
+        }
+
+        s.extend(name.trim_ascii_end().iter().copied().map(map_chars));
 
         if !ext.is_empty() {
             s.push('.');
 
-            s += ext;
+            s.extend(ext.trim_ascii_end().iter().copied().map(map_chars));
         }
 
-        Some(s)
+        s
     }
 
     pub fn long_name(&self) -> Option<&str> {
@@ -463,6 +501,11 @@ impl LongFilenameBuf {
         if dir_entry.is_last() {
             // first/lasts entry
 
+            anyhow::ensure!(
+                dir_entry.ordinal() <= 20,
+                "can't have more than 20 long filename dir entries"
+            );
+
             let mut name = dir_entry.name();
 
             while name.last() == Some(&0xFFFF) {
@@ -485,7 +528,7 @@ impl LongFilenameBuf {
             return Ok(());
         }
 
-        assert!(self.checksum.is_some());
+        assert!(self.checksum.is_some() && self.last_ordinal.is_some());
 
         anyhow::ensure!(
             self.checksum == Some(dir_entry.checksum()),
@@ -534,6 +577,8 @@ impl LongFilenameBuf {
             checksum,
             self.checksum.unwrap()
         );
+
+        anyhow::ensure!(self.rev_buf.len() <= 255, "long filename too long");
 
         Ok(Some(self.rev_buf.iter().copied().rev()))
     }
@@ -590,7 +635,7 @@ impl<R: Read> DirIter<R> {
             .map_err(|e| {
                 anyhow::anyhow!(
                     "failed to get long filename for {}: {}",
-                    dir_entry.name_string().as_deref().unwrap_or("<invalid>"),
+                    dir_entry.name_string(),
                     e
                 )
             })?

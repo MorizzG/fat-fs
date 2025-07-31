@@ -1,4 +1,5 @@
 use std::cell::{LazyCell, RefCell};
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use chrono::{NaiveDateTime, NaiveTime};
@@ -49,7 +50,7 @@ impl From<Kind> for fuser::FileType {
     }
 }
 
-const ROOT_INO: u64 = 1;
+pub const ROOT_INO: u64 = 1;
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -60,6 +61,8 @@ pub struct Inode {
     generation: u32,
 
     ref_count: u64,
+
+    parent_ino: u64,
 
     size: u64,
     block_size: u32,
@@ -77,6 +80,8 @@ pub struct Inode {
     gid: u32,
 
     first_cluster: u32,
+
+    path: Rc<str>,
 }
 
 #[allow(dead_code)]
@@ -92,7 +97,15 @@ impl Inode {
         ((secs as u32) << 16) | rand as u32
     }
 
-    pub fn new(fat_fs: &FatFs, dir_entry: &DirEntry, ino: u64, uid: u32, gid: u32) -> Inode {
+    pub fn new(
+        fat_fs: &FatFs,
+        dir_entry: &DirEntry,
+        ino: u64,
+        uid: u32,
+        gid: u32,
+        path: impl Into<Rc<str>>,
+        parent_ino: u64,
+    ) -> Inode {
         assert!(dir_entry.is_file() || dir_entry.is_dir());
 
         let generation = Self::new_generation();
@@ -115,16 +128,20 @@ impl Inode {
         let mtime = datetime_to_system(dir_entry.write_time());
         let crtime = datetime_to_system(dir_entry.create_time());
 
+        let path = path.into();
+
         debug!(
-            "creating new inode: ino: {}    name: {}",
+            "creating new inode: ino: {}    name: {}    path: {}",
             ino,
-            dir_entry.name_string().unwrap_or("<invalid>".into())
+            dir_entry.name_string(),
+            path
         );
 
         Inode {
             ino,
             generation,
             ref_count: 0,
+            parent_ino,
             size: dir_entry.file_size() as u64,
             block_size: fat_fs.bpb().bytes_per_sector() as u32,
             kind,
@@ -135,6 +152,7 @@ impl Inode {
             uid,
             gid,
             first_cluster: dir_entry.first_cluster(),
+            path,
         }
     }
 
@@ -147,6 +165,7 @@ impl Inode {
             ino: 1,
             generation: 0,
             ref_count: 0,
+            parent_ino: ROOT_INO, // parent is self
             size: 0,
             block_size: fat_fs.bpb().bytes_per_sector() as u32,
             kind: Kind::Dir,
@@ -157,6 +176,7 @@ impl Inode {
             uid,
             gid,
             first_cluster: root_cluster,
+            path: "/".into(),
         }
     }
 
@@ -172,11 +192,24 @@ impl Inode {
         self.ref_count
     }
 
-    pub fn refcount_inc(&mut self) {
+    pub fn inc_ref_count(&mut self) {
+        debug!(
+            "increasing ref_count of ino {} by 1 (new ref_count: {})",
+            self.ino(),
+            self.ref_count() + 1
+        );
+
         self.ref_count += 1;
     }
 
-    pub fn refcount_dec(&mut self, n: u64) -> u64 {
+    pub fn dec_ref_count(&mut self, n: u64) -> u64 {
+        debug!(
+            "decreasing ref_count of ino {} by {} (new ref_count: {})",
+            self.ino(),
+            n,
+            self.ref_count().saturating_sub(n),
+        );
+
         if self.ref_count < n {
             debug!(
                 "inode {}: tried to decrement refcount by {}, but is only {}",
@@ -191,12 +224,20 @@ impl Inode {
         self.ref_count
     }
 
+    pub fn parent_ino(&self) -> u64 {
+        self.parent_ino
+    }
+
     pub fn kind(&self) -> Kind {
         self.kind
     }
 
     pub fn first_cluster(&self) -> u32 {
         self.first_cluster
+    }
+
+    pub fn path(&self) -> Rc<str> {
+        Rc::clone(&self.path)
     }
 
     pub fn is_root(&self) -> bool {

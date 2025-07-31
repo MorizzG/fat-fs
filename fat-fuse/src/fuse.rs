@@ -1,4 +1,5 @@
 use std::ffi::c_int;
+use std::rc::Rc;
 use std::time::Duration;
 
 use fat_bits::dir::DirEntry;
@@ -28,9 +29,6 @@ impl Filesystem for FatFuse {
         name: &std::ffi::OsStr,
         reply: fuser::ReplyEntry,
     ) {
-        // warn!("[Not Implemented] lookup(parent: {:#x?}, name {:?})", parent, name);
-        // reply.error(ENOSYS);
-
         let Some(name) = name.to_str() else {
             // TODO: add proper handling of non-utf8 strings
             debug!("cannot convert OsStr {:?} to str", name);
@@ -67,7 +65,7 @@ impl Filesystem for FatFuse {
             // .map_err(|_| ENOTDIR)
             .and_then(|mut dir_iter| {
                 dir_iter
-                    .find(|dir_entry| dir_entry.name_string().as_deref() == Some(name))
+                    .find(|dir_entry| &dir_entry.name_string() == name)
                     .ok_or(ENOENT)
             }) {
             Ok(dir_entry) => dir_entry,
@@ -91,17 +89,23 @@ impl Filesystem for FatFuse {
         //     }
         // };
 
-        let inode = self.get_or_make_inode_by_dir_entry(&dir_entry);
+        let inode = self.get_or_make_inode_by_dir_entry(
+            &dir_entry,
+            parent_inode.ino(),
+            parent_inode.path(),
+        );
 
         let attr = inode.file_attr();
         let generation = inode.generation();
 
         reply.entry(&TTL, &attr, generation as u64);
 
-        inode.refcount_inc();
+        inode.inc_ref_count();
     }
 
     fn forget(&mut self, _req: &fuser::Request<'_>, ino: u64, nlookup: u64) {
+        debug!("forgetting ino {} ({} times)", ino, nlookup);
+
         let Some(inode) = self.get_inode_mut(ino) else {
             debug!("tried to forget {} refs of inode {}, but was not found", ino, nlookup);
 
@@ -110,7 +114,9 @@ impl Filesystem for FatFuse {
 
         // *ref_count = ref_count.saturating_sub(nlookup);
 
-        if inode.refcount_dec(nlookup) == 0 {
+        if inode.dec_ref_count(nlookup) == 0 {
+            debug!("dropping inode with ino {}", inode.ino());
+
             // no more references, drop inode
             self.drop_inode(ino);
         }
@@ -380,17 +386,17 @@ impl Filesystem for FatFuse {
             return;
         };
 
-        let Some(inode) = self.get_inode_by_fh(fh) else {
+        let Some(dir_inode) = self.get_inode_by_fh(fh) else {
             debug!("could not find inode accociated with fh {} (ino: {})", fh, ino);
 
             reply.error(EINVAL);
             return;
         };
 
-        if inode.ino() != ino {
+        if dir_inode.ino() != ino {
             debug!(
                 "ino {} of inode associated with fh {} does not match given ino {}",
-                inode.ino(),
+                dir_inode.ino(),
                 fh,
                 ino
             );
@@ -406,7 +412,7 @@ impl Filesystem for FatFuse {
             next_idx
         };
 
-        if inode.is_root() {
+        if dir_inode.is_root() {
             if offset == 0 {
                 debug!("adding . to root dir");
                 if reply.add(1, next_offset(), FileType::Directory, ".") {
@@ -426,7 +432,7 @@ impl Filesystem for FatFuse {
             }
         }
 
-        let Ok(dir_iter) = inode.dir_iter(&self.fat_fs) else {
+        let Ok(dir_iter) = dir_inode.dir_iter(&self.fat_fs) else {
             reply.error(ENOTDIR);
             return;
         };
@@ -435,10 +441,14 @@ impl Filesystem for FatFuse {
         // also skip over `offset` entries
         let dirs: Vec<DirEntry> = dir_iter.skip(offset).collect();
 
-        for dir_entry in dirs {
-            let name = dir_entry.name_string().unwrap_or("<invalid>".into());
+        let dir_ino = dir_inode.ino();
+        let dir_path = dir_inode.path();
 
-            let inode: &Inode = self.get_or_make_inode_by_dir_entry(&dir_entry);
+        for dir_entry in dirs {
+            let name = dir_entry.name_string();
+
+            let inode: &Inode =
+                self.get_or_make_inode_by_dir_entry(&dir_entry, dir_ino, Rc::clone(&dir_path));
 
             debug!("adding entry {} (ino: {})", name, inode.ino());
             if reply.add(ino, next_offset(), inode.kind().into(), name) {
