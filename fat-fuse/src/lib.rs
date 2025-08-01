@@ -206,12 +206,9 @@ impl FatFuse {
         self.inode_table.get(&ino)
     }
 
-    fn get_or_make_inode_by_dir_entry(
-        &mut self,
-        dir_entry: &DirEntry,
-        parent_ino: u64,
-        parent_path: Rc<str>,
-    ) -> InodeRef {
+    fn get_or_make_inode(&mut self, dir_entry: &DirEntry, parent: &Inode) -> InodeRef {
+        // let parent = parent.borrow();
+
         // try to find inode by first cluster first
         if dir_entry.first_cluster() != 0
             && let Some(inode) = self.get_inode_by_first_cluster(dir_entry.first_cluster())
@@ -223,9 +220,9 @@ impl FatFuse {
         // mostly for empty files/directories which have a first cluster of 0
 
         let path = {
-            let mut path = parent_path.as_ref().to_owned();
+            let mut path = parent.path().as_ref().to_owned();
 
-            if parent_ino != inode::ROOT_INO {
+            if parent.ino() != inode::ROOT_INO {
                 // root inode already has trailing slash
                 path.push('/');
             }
@@ -242,9 +239,9 @@ impl FatFuse {
         // no inode found, make a new one
         let ino = self.next_ino();
 
-        let Some(parent_inode) = self.get_inode(parent_ino).cloned() else {
+        let Some(parent_inode) = self.get_inode(parent.ino()).cloned() else {
             // TODO: what do we do here? should not happen
-            panic!("parent_ino {} does not lead to inode", parent_ino);
+            panic!("parent_ino {} does not lead to inode", parent.ino());
         };
 
         let inode =

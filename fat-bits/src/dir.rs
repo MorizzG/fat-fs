@@ -270,6 +270,17 @@ impl DirEntry {
         self.write(sub_slice)
     }
 
+    /// erase this DirEntry
+    pub fn erase(self, fat_fs: &FatFs) -> std::io::Result<()> {
+        let mut sub_slice = SubSliceMut::new(fat_fs.inner.clone(), self.offset, 32);
+
+        // set first byte to 0xE5 (free)
+        sub_slice.write_all(&[0xe5])?;
+
+        // paste over with zeros
+        sub_slice.write_all(&[0; 31])
+    }
+
     /// indicates this DirEntry is empty
     ///
     /// can be either simply empty (0xe5) or the sentinel (0x00) that indicates that all following
@@ -660,62 +671,8 @@ impl<'a> DirIter<'a> {
         }
     }
 
-    /// inner function for iterator
-    fn next_impl(&mut self) -> anyhow::Result<Option<DirEntry>> {
-        let offset = self.reader.current_offset();
-
-        let mut chunk = [0; 32];
-
-        if self.reader.read_exact(&mut chunk).is_err() {
-            // nothing we can do here since we might be in an invalid state after a partial read
-            anyhow::bail!("read failed");
-        }
-
-        let dir_entry = DirEntryWrapper::load(&chunk, offset)
-            .map_err(|e| anyhow::anyhow!("failed to load dir entry: {e}"))?;
-
-        let mut dir_entry = match dir_entry {
-            DirEntryWrapper::Regular(dir_entry) => dir_entry,
-            DirEntryWrapper::LongName(long_name) => {
-                self.long_filename_buf.next(long_name).map_err(|e| {
-                    self.long_filename_buf.reset();
-                    anyhow::anyhow!("invalid long filename entry: {e}")
-                })?;
-
-                return self.next_impl();
-            }
-        };
-
-        if dir_entry.is_sentinel() {
-            return Ok(None);
-        }
-
-        if dir_entry.is_empty() {
-            return self.next_impl();
-        }
-
-        if let Some(iter) = self
-            .long_filename_buf
-            .get_buf(dir_entry.checksum)
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to get long filename for {}: {}",
-                    dir_entry.name_string(),
-                    e
-                )
-            })?
-        {
-            // attach long filename to dir_entry
-
-            let long_filename: CompactString =
-                char::decode_utf16(iter).filter_map(|x| x.ok()).collect();
-
-            dir_entry.set_long_name(long_filename);
-        }
-
-        self.long_filename_buf.reset();
-
-        Ok(Some(dir_entry))
+    pub fn find_by_name(&mut self, name: &str) -> Option<DirEntry> {
+        self.find(|dir_entry| &dir_entry.name_string() == name)
     }
 }
 
@@ -723,7 +680,64 @@ impl Iterator for DirIter<'_> {
     type Item = DirEntry;
 
     fn next(&mut self) -> Option<Self::Item> {
-        match self.next_impl() {
+        fn next_impl(me: &mut DirIter<'_>) -> anyhow::Result<Option<DirEntry>> {
+            let offset = me.reader.current_offset();
+
+            let mut chunk = [0; 32];
+
+            if me.reader.read_exact(&mut chunk).is_err() {
+                // nothing we can do here since we might be in an invalid state after a partial read
+                anyhow::bail!("read failed");
+            }
+
+            let dir_entry = DirEntryWrapper::load(&chunk, offset)
+                .map_err(|e| anyhow::anyhow!("failed to load dir entry: {e}"))?;
+
+            let mut dir_entry = match dir_entry {
+                DirEntryWrapper::Regular(dir_entry) => dir_entry,
+                DirEntryWrapper::LongName(long_name) => {
+                    me.long_filename_buf.next(long_name).map_err(|e| {
+                        me.long_filename_buf.reset();
+                        anyhow::anyhow!("invalid long filename entry: {e}")
+                    })?;
+
+                    return next_impl(me);
+                }
+            };
+
+            if dir_entry.is_sentinel() {
+                return Ok(None);
+            }
+
+            if dir_entry.is_empty() {
+                return next_impl(me);
+            }
+
+            if let Some(iter) = me
+                .long_filename_buf
+                .get_buf(dir_entry.checksum)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "failed to get long filename for {}: {}",
+                        dir_entry.name_string(),
+                        e
+                    )
+                })?
+            {
+                // attach long filename to dir_entry
+
+                let long_filename: CompactString =
+                    char::decode_utf16(iter).filter_map(|x| x.ok()).collect();
+
+                dir_entry.set_long_name(long_filename);
+            }
+
+            me.long_filename_buf.reset();
+
+            Ok(Some(dir_entry))
+        }
+
+        match next_impl(self) {
             Ok(x) => x,
             Err(e) => {
                 // print error message, try next

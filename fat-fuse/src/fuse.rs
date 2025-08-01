@@ -1,6 +1,5 @@
 use std::ffi::c_int;
 use std::io::{Read, Write};
-use std::rc::Rc;
 use std::time::Duration;
 
 use fat_bits::dir::DirEntry;
@@ -44,7 +43,8 @@ impl Filesystem for FatFuse {
         let Some(name) = name.to_str() else {
             // TODO: add proper handling of non-utf8 strings
             debug!("cannot convert OsStr {:?} to str", name);
-            reply.error(ENOSYS);
+
+            reply.error(EINVAL);
             return;
         };
 
@@ -62,28 +62,17 @@ impl Filesystem for FatFuse {
 
         let parent_inode = parent_inode.borrow();
 
-        let dir_entry: DirEntry =
-            match parent_inode
-                .dir_iter(&self.fat_fs)
-                .and_then(|mut dir_iter| {
-                    dir_iter
-                        .find(|dir_entry| &dir_entry.name_string() == name)
-                        .ok_or(ENOENT)
-                }) {
-                Ok(dir_entry) => dir_entry,
-                Err(err) => {
-                    debug!("error: {}", err);
-                    reply.error(err);
+        let dir_entry: DirEntry = match parent_inode.find_child_by_name(&self.fat_fs, name) {
+            Ok(dir_entry) => dir_entry,
+            Err(err) => {
+                debug!("error: {}", err);
+                reply.error(err);
 
-                    return;
-                }
-            };
+                return;
+            }
+        };
 
-        let inode = self.get_or_make_inode_by_dir_entry(
-            &dir_entry,
-            parent_inode.ino(),
-            parent_inode.path(),
-        );
+        let inode = self.get_or_make_inode(&dir_entry, &parent_inode);
 
         let mut inode = inode.borrow_mut();
 
@@ -239,8 +228,39 @@ impl Filesystem for FatFuse {
         name: &std::ffi::OsStr,
         reply: fuser::ReplyEmpty,
     ) {
-        debug!("[Not Implemented] rmdir(parent: {:#x?}, name: {:?})", parent, name,);
-        reply.error(ENOSYS);
+        let Some(name) = name.to_str() else {
+            // TODO: add proper handling of non-utf8 strings
+            debug!("cannot convert OsStr {:?} to str", name);
+
+            reply.error(EINVAL);
+            return;
+        };
+
+        let Some(parent_inode) = self.get_inode(parent) else {
+            debug!("parent inode {parent} does not exist");
+
+            reply.error(ENOENT);
+            return;
+        };
+
+        let dir_entry = match parent_inode.borrow().find_child_by_name(&self.fat_fs, name) {
+            Ok(dir_entry) => dir_entry,
+            Err(err) => {
+                debug!("parent inode {parent} has no child {name}");
+
+                reply.error(err);
+                return;
+            }
+        };
+
+        if let Err(err) = dir_entry.erase(&self.fat_fs) {
+            debug!("error while erasing DirEntry: {err}");
+
+            reply.error(EIO);
+            return;
+        }
+
+        reply.ok();
     }
 
     fn rename(
@@ -651,14 +671,10 @@ impl Filesystem for FatFuse {
         // also skip over `offset` entries
         let dirs: Vec<DirEntry> = dir_iter.skip(offset).collect();
 
-        let dir_ino = dir_inode.ino();
-        let dir_path = dir_inode.path();
-
         for dir_entry in dirs {
             let name = dir_entry.name_string();
 
-            let inode =
-                self.get_or_make_inode_by_dir_entry(&dir_entry, dir_ino, Rc::clone(&dir_path));
+            let inode = self.get_or_make_inode(&dir_entry, &dir_inode);
 
             let inode = inode.borrow();
 

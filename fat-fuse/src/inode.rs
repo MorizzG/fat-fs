@@ -4,10 +4,10 @@ use std::time::SystemTime;
 
 use chrono::{NaiveDateTime, NaiveTime};
 use fat_bits::FatFs;
-use fat_bits::dir::DirEntry;
+use fat_bits::dir::{DirEntry, DirIter};
 use fat_bits::iter::{ClusterChainReader, ClusterChainWriter};
 use fuser::FileAttr;
-use libc::{EISDIR, ENOTDIR};
+use libc::{EISDIR, ENOENT, ENOTDIR};
 use log::debug;
 use rand::{Rng, SeedableRng as _};
 
@@ -311,7 +311,7 @@ impl Inode {
         }
     }
 
-    pub fn dir_iter(&self, fat_fs: &FatFs) -> Result<impl Iterator<Item = DirEntry>, i32> {
+    pub fn dir_iter<'a>(&'a self, fat_fs: &'a FatFs) -> Result<DirIter<'a>, i32> {
         if self.kind != Kind::Dir {
             return Err(ENOTDIR);
         }
@@ -323,6 +323,11 @@ impl Inode {
         }
 
         Ok(fat_fs.dir_iter(self.first_cluster))
+    }
+
+    pub fn find_child_by_name(&self, fat_fs: &FatFs, name: &str) -> Result<DirEntry, i32> {
+        self.dir_iter(fat_fs)
+            .and_then(|mut dir_iter| dir_iter.find_by_name(name).ok_or(ENOENT))
     }
 
     pub fn file_reader<'a>(&'a self, fat_fs: &'a FatFs) -> Result<ClusterChainReader<'a>, i32> {
