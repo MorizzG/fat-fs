@@ -5,7 +5,10 @@ use bitflags::bitflags;
 use chrono::{NaiveDate, NaiveDateTime, TimeDelta};
 use compact_str::CompactString;
 
+use crate::FatFs;
 use crate::datetime::{Date, Time};
+use crate::iter::ClusterChainReader;
+use crate::subslice::SubSliceMut;
 use crate::utils::{load_u16_le, load_u32_le};
 
 bitflags! {
@@ -67,6 +70,8 @@ pub struct DirEntry {
 
     checksum: u8,
     long_name: Option<CompactString>,
+
+    offset: u64,
 }
 
 impl Display for DirEntry {
@@ -141,7 +146,7 @@ impl DirEntry {
         name
     }
 
-    pub fn load(bytes: &[u8]) -> anyhow::Result<DirEntry> {
+    pub fn load(bytes: &[u8], offset: u64) -> anyhow::Result<DirEntry> {
         assert_eq!(bytes.len(), 32);
 
         let attr = Attr::from_bits_truncate(bytes[11]);
@@ -196,11 +201,15 @@ impl DirEntry {
             file_size,
             long_name: None,
             checksum: Self::checksum(&bytes[..11]),
+            offset,
         })
     }
 
-    pub fn write(&self, mut writer: impl Write) -> std::io::Result<()> {
+    fn write(&self, mut writer: impl Write) -> std::io::Result<()> {
         let mut buf = [0; 32];
+
+        // fill name with 0x20
+        buf[..11].copy_from_slice(&[0x20; 11]);
 
         let mut name = self.name();
 
@@ -246,9 +255,19 @@ impl DirEntry {
 
         buf[28..].copy_from_slice(&self.file_size.to_le_bytes());
 
+        eprintln!("writing new dir entry: {:?}", buf);
+
         writer.write_all(&buf)?;
 
         Ok(())
+    }
+
+    /// write this DisEntry back to the underlying data
+    pub fn update(&self, fat_fs: &FatFs) -> std::io::Result<()> {
+        eprintln!("making new SubSliceMut at offset {:#X}", self.offset);
+        let sub_slice = SubSliceMut::new(fat_fs.inner.clone(), self.offset, 32);
+
+        self.write(sub_slice)
     }
 
     /// indicates this DirEntry is empty
@@ -344,25 +363,6 @@ impl DirEntry {
             s.push('.');
         }
 
-        // s += name;
-
-        // for &c in self.name[..8].trim_ascii_end() {
-        //     // stem
-
-        //     if !c.is_ascii()
-        //         || c < 0x20
-        //         || !(c.is_ascii_alphanumeric() || VALID_SYMBOLS.contains(&c))
-        //     {
-        //         // replace invalid character
-        //         // characters above 127 are also ignored, even tho allowed
-        //         s.push('?');
-
-        //         continue;
-        //     }
-
-        //     s.push(c as char);
-        // }
-
         const VALID_SYMBOLS: &[u8] = &[
             b'$', b'%', b'\'', b'-', b'_', b'@', b'~', b'`', b'!', b'(', b')', b'{', b'}', b'^',
             b'#', b'&',
@@ -430,6 +430,10 @@ impl DirEntry {
 
     pub fn file_size(&self) -> u32 {
         self.file_size
+    }
+
+    pub fn update_file_size(&mut self, file_size: u32) {
+        self.file_size = file_size
     }
 
     pub fn checksum(name: &[u8]) -> u8 {
@@ -526,7 +530,7 @@ enum DirEntryWrapper {
 }
 
 impl DirEntryWrapper {
-    pub fn load(bytes: &[u8]) -> anyhow::Result<DirEntryWrapper> {
+    pub fn load(bytes: &[u8], offset: u64) -> anyhow::Result<DirEntryWrapper> {
         assert_eq!(bytes.len(), 32);
 
         let attr = Attr::from_bits_truncate(bytes[11]);
@@ -534,7 +538,7 @@ impl DirEntryWrapper {
         let dir_entry = if attr == Attr::LongName {
             DirEntryWrapper::LongName(LongNameDirEntry::load(bytes)?)
         } else {
-            DirEntryWrapper::Regular(DirEntry::load(bytes)?)
+            DirEntryWrapper::Regular(DirEntry::load(bytes, offset)?)
         };
 
         Ok(dir_entry)
@@ -642,14 +646,14 @@ impl LongFilenameBuf {
     }
 }
 
-pub struct DirIter<R: Read> {
-    reader: R,
+pub struct DirIter<'a> {
+    reader: ClusterChainReader<'a>,
 
     long_filename_buf: LongFilenameBuf,
 }
 
-impl<R: Read> DirIter<R> {
-    pub fn new(reader: R) -> DirIter<R> {
+impl<'a> DirIter<'a> {
+    pub fn new(reader: ClusterChainReader<'a>) -> Self {
         DirIter {
             reader,
             long_filename_buf: Default::default(),
@@ -658,13 +662,16 @@ impl<R: Read> DirIter<R> {
 
     /// inner function for iterator
     fn next_impl(&mut self) -> anyhow::Result<Option<DirEntry>> {
+        let offset = self.reader.current_offset();
+
         let mut chunk = [0; 32];
+
         if self.reader.read_exact(&mut chunk).is_err() {
             // nothing we can do here since we might be in an invalid state after a partial read
-            return Ok(None);
+            anyhow::bail!("read failed");
         }
 
-        let dir_entry = DirEntryWrapper::load(&chunk)
+        let dir_entry = DirEntryWrapper::load(&chunk, offset)
             .map_err(|e| anyhow::anyhow!("failed to load dir entry: {e}"))?;
 
         let mut dir_entry = match dir_entry {
@@ -712,7 +719,7 @@ impl<R: Read> DirIter<R> {
     }
 }
 
-impl<R: Read> Iterator for DirIter<R> {
+impl Iterator for DirIter<'_> {
     type Item = DirEntry;
 
     fn next(&mut self) -> Option<Self::Item> {

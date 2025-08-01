@@ -29,7 +29,7 @@ pub fn main() -> anyhow::Result<()> {
     println!(
         "free clusters: {} ({} bytes)",
         fat_fs.free_clusters(),
-        fat_fs.free_clusters()
+        fat_fs.free_clusters() as usize
             * fat_fs.bytes_per_sector() as usize
             * fat_fs.sectors_per_cluster() as usize
     );

@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 
-use crate::FatFs;
 use crate::subslice::{SubSlice, SubSliceMut};
+use crate::{FatFs, FatType};
 
 pub struct ClusterChainReader<'a> {
     fat_fs: &'a FatFs,
@@ -12,7 +12,7 @@ pub struct ClusterChainReader<'a> {
 }
 
 impl<'a> ClusterChainReader<'a> {
-    pub fn new(fat_fs: &'a FatFs, first_cluster: u32) -> ClusterChainReader<'a> {
+    pub fn new(fat_fs: &'a FatFs, first_cluster: u32) -> Self {
         let next_cluster = fat_fs.next_cluster(first_cluster).unwrap_or(None);
 
         let sub_slice = fat_fs.cluster_as_subslice(first_cluster);
@@ -21,6 +21,28 @@ impl<'a> ClusterChainReader<'a> {
             fat_fs,
             sub_slice,
             next_cluster,
+        }
+    }
+
+    pub fn root_dir_reader(fat_fs: &'a FatFs) -> Self {
+        match fat_fs.fat_type() {
+            FatType::Fat12 | FatType::Fat16 => {
+                // fixed root dir, so no need to chain
+                // get a single SubSlice for it and next_cluster is None
+
+                let sub_slice = fat_fs.root_dir_as_subslice();
+
+                ClusterChainReader {
+                    fat_fs,
+                    sub_slice,
+                    next_cluster: None,
+                }
+            }
+            FatType::Fat32 => {
+                // FAT is directory_like, so get a real chain reader
+
+                Self::new(fat_fs, fat_fs.bpb.root_cluster().unwrap())
+            }
         }
     }
 
@@ -55,6 +77,10 @@ impl<'a> ClusterChainReader<'a> {
 
         n
     }
+
+    pub fn current_offset(&self) -> u64 {
+        self.sub_slice.offset()
+    }
 }
 
 impl Read for ClusterChainReader<'_> {
@@ -78,7 +104,7 @@ pub struct ClusterChainWriter<'a> {
 }
 
 impl<'a> ClusterChainWriter<'a> {
-    pub fn new(fat_fs: &'a FatFs, first_cluster: u32) -> ClusterChainWriter<'a> {
+    pub fn new(fat_fs: &'a FatFs, first_cluster: u32) -> Self {
         let next_cluster = fat_fs.next_cluster(first_cluster).unwrap_or(None);
 
         let sub_slice = fat_fs.cluster_as_subslice_mut(first_cluster);
@@ -87,6 +113,28 @@ impl<'a> ClusterChainWriter<'a> {
             fat_fs,
             sub_slice,
             next_cluster,
+        }
+    }
+
+    pub fn root_dir_writer(fat_fs: &'a FatFs) -> Self {
+        match fat_fs.fat_type() {
+            FatType::Fat12 | FatType::Fat16 => {
+                // fixed root dir, so no need to chain
+                // get a single SubSliceMut for it and next_cluster is None
+
+                let sub_slice = fat_fs.root_dir_as_subslice_mut();
+
+                ClusterChainWriter {
+                    fat_fs,
+                    sub_slice,
+                    next_cluster: None,
+                }
+            }
+            FatType::Fat32 => {
+                // FAT is directory_like, so get a real chain writer
+
+                Self::new(fat_fs, fat_fs.bpb.root_cluster().unwrap())
+            }
         }
     }
 
@@ -121,6 +169,10 @@ impl<'a> ClusterChainWriter<'a> {
         assert_eq!(bytes_to_skip, 0);
 
         n
+    }
+
+    pub fn current_offset(&self) -> u64 {
+        self.sub_slice.offset()
     }
 }
 

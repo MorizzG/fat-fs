@@ -27,17 +27,23 @@ pub trait FatOps {
     fn get_entry(&self, cluster: u32) -> u32;
     fn set_entry(&mut self, cluster: u32, entry: u32);
 
-    fn valid_clusters(&self) -> RangeInclusive<u32>;
-    fn reserved_clusters(&self) -> RangeInclusive<u32>;
-    fn defective_cluster(&self) -> u32;
-    fn reserved_eof_clusters(&self) -> RangeInclusive<u32>;
-    fn eof_cluster(&self) -> u32;
+    fn valid_entries(&self) -> RangeInclusive<u32>;
+    fn reserved_entries(&self) -> RangeInclusive<u32>;
+    fn defective_entry(&self) -> u32;
+    fn reserved_eof_entries(&self) -> RangeInclusive<u32>;
+    fn eof_entry(&self) -> u32;
 
-    fn count_free_clusters(&self) -> usize {
-        self.valid_clusters()
+    fn count_free_clusters(&self) -> u32 {
+        self.valid_entries()
             .map(|cluster| self.get_entry(cluster))
             .filter(|&entry| entry == 0)
-            .count()
+            .count() as u32
+    }
+
+    fn first_free_cluster(&self) -> Option<u32> {
+        self.valid_entries()
+            .map(|cluster| self.get_entry(cluster))
+            .find(|&entry| entry == 0)
     }
 
     fn write_to_disk(&self, sub_slice: SubSliceMut) -> std::io::Result<()>;
@@ -75,18 +81,18 @@ impl Fat {
             return Err(FatError::FreeCluster);
         }
 
-        if self.reserved_clusters().contains(&cluster) {
+        if self.reserved_entries().contains(&cluster) {
             // can't get next cluster for reserved cluster
             return Err(FatError::ReservedCluster(cluster));
         }
 
         // defective cluster
-        if cluster == self.defective_cluster() {
+        if cluster == self.defective_entry() {
             // can't get next cluster for defective cluster
             return Err(FatError::DefectiveCluster);
         }
 
-        if self.reserved_eof_clusters().contains(&cluster) {
+        if self.reserved_eof_entries().contains(&cluster) {
             // Reserved and should not be used. May be interpreted as an allocated cluster and the
             // final cluster in the file (indicating end-of-file condition).
             //
@@ -99,12 +105,12 @@ impl Fat {
         let entry = self.get_entry(cluster);
 
         // interpret second reserved block as EOF here
-        if entry == self.eof_cluster() || self.reserved_eof_clusters().contains(&entry) {
+        if entry == self.eof_entry() || self.reserved_eof_entries().contains(&entry) {
             return Ok(None);
         }
 
         // entry should be in the valid cluster range here; otherwise something went wrong
-        if !self.valid_clusters().contains(&entry) {
+        if !self.valid_entries().contains(&entry) {
             return Err(FatError::InvalidEntry(entry));
         }
 
@@ -195,23 +201,23 @@ impl FatOps for Fat12 {
         self.next_sectors[cluster as usize] = entry as u16;
     }
 
-    fn valid_clusters(&self) -> RangeInclusive<u32> {
+    fn valid_entries(&self) -> RangeInclusive<u32> {
         2..=self.max
     }
 
-    fn reserved_clusters(&self) -> RangeInclusive<u32> {
+    fn reserved_entries(&self) -> RangeInclusive<u32> {
         (self.max as u32 + 1)..=0xFF6
     }
 
-    fn defective_cluster(&self) -> u32 {
+    fn defective_entry(&self) -> u32 {
         0xFF7
     }
 
-    fn reserved_eof_clusters(&self) -> RangeInclusive<u32> {
+    fn reserved_eof_entries(&self) -> RangeInclusive<u32> {
         0xFF8..=0xFFE
     }
 
-    fn eof_cluster(&self) -> u32 {
+    fn eof_entry(&self) -> u32 {
         0xFFF
     }
 
@@ -322,23 +328,23 @@ impl FatOps for Fat16 {
         self.next_sectors[cluster as usize] = entry as u16;
     }
 
-    fn valid_clusters(&self) -> RangeInclusive<u32> {
+    fn valid_entries(&self) -> RangeInclusive<u32> {
         2..=self.max
     }
 
-    fn reserved_clusters(&self) -> RangeInclusive<u32> {
+    fn reserved_entries(&self) -> RangeInclusive<u32> {
         (self.max as u32 + 1)..=0xFFF6
     }
 
-    fn defective_cluster(&self) -> u32 {
+    fn defective_entry(&self) -> u32 {
         0xFFF7
     }
 
-    fn reserved_eof_clusters(&self) -> RangeInclusive<u32> {
+    fn reserved_eof_entries(&self) -> RangeInclusive<u32> {
         0xFFF8..=0xFFFE
     }
 
-    fn eof_cluster(&self) -> u32 {
+    fn eof_entry(&self) -> u32 {
         0xFFFF
     }
 
@@ -420,23 +426,23 @@ impl FatOps for Fat32 {
         self.next_sectors[cluster as usize] = entry;
     }
 
-    fn valid_clusters(&self) -> RangeInclusive<u32> {
+    fn valid_entries(&self) -> RangeInclusive<u32> {
         2..=self.max
     }
 
-    fn reserved_clusters(&self) -> RangeInclusive<u32> {
+    fn reserved_entries(&self) -> RangeInclusive<u32> {
         (self.max + 1)..=0xFFFFFFF6
     }
 
-    fn defective_cluster(&self) -> u32 {
+    fn defective_entry(&self) -> u32 {
         0xFFFFFFF7
     }
 
-    fn reserved_eof_clusters(&self) -> RangeInclusive<u32> {
+    fn reserved_eof_entries(&self) -> RangeInclusive<u32> {
         0xFFFFFFF8..=0xFFFFFFFE
     }
 
-    fn eof_cluster(&self) -> u32 {
+    fn eof_entry(&self) -> u32 {
         0xFFFFFFFF
     }
 

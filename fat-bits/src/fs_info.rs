@@ -40,4 +40,12 @@ impl FsInfo {
             next_free,
         })
     }
+
+    pub fn free_count(&self) -> u32 {
+        self.free_count
+    }
+
+    pub fn next_free(&self) -> Option<u32> {
+        Some(self.next_free)
+    }
 }

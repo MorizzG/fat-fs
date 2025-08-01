@@ -1,5 +1,5 @@
 use std::cell::{LazyCell, RefCell};
-use std::rc::{Rc, Weak};
+use std::rc::Rc;
 use std::time::SystemTime;
 
 use chrono::{NaiveDateTime, NaiveTime};
@@ -48,7 +48,7 @@ impl From<Kind> for fuser::FileType {
 pub const ROOT_INO: u64 = 1;
 
 pub type InodeRef = Rc<RefCell<Inode>>;
-pub type InodeWeak = Weak<RefCell<Inode>>;
+// pub type InodeWeak = Weak<RefCell<Inode>>;
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -220,18 +220,45 @@ impl Inode {
         self.ref_count
     }
 
-    pub fn parent(&self) -> Option<InodeRef> {
-        self.parent.clone()
+    pub fn parent(&self) -> Option<&InodeRef> {
+        self.parent.as_ref()
     }
 
     pub fn size(&self) -> u64 {
         self.size
     }
 
-    pub fn update_size(&mut self, new_size: u64) {
+    pub fn update_size(&mut self, fat_fs: &FatFs, new_size: u64) -> anyhow::Result<()> {
+        let Some(parent_inode) = self.parent() else {
+            anyhow::bail!("parent inode of {} does not exist", self.ino);
+        };
+
+        let parent_inode = parent_inode.borrow();
+
+        // since we just wrote to the file with this inode, first cluster should not be zero
+        let Some(mut dir_entry) = parent_inode
+            .dir_iter(fat_fs)
+            .unwrap()
+            .find(|dir_entry| dir_entry.first_cluster() == self.first_cluster())
+        else {
+            anyhow::bail!("could not find dir_entry corresponding to self in parent inode");
+        };
+
+        debug!("new file size: {new_size}");
+
+        assert!(new_size <= u32::MAX as u64);
+
+        dir_entry.update_file_size(new_size as u32);
+
+        if dir_entry.update(fat_fs).is_err() {
+            anyhow::bail!("failed to update dir_entry for inode {}", self.ino);
+        }
+
+        drop(parent_inode);
+
         self.size = new_size;
 
-        todo!("update dir entry")
+        Ok(())
     }
 
     pub fn kind(&self) -> Kind {
@@ -285,8 +312,6 @@ impl Inode {
     }
 
     pub fn dir_iter(&self, fat_fs: &FatFs) -> Result<impl Iterator<Item = DirEntry>, i32> {
-        // anyhow::ensure!(self.kind == Kind::Dir, "cannot dir_iter on a file");
-
         if self.kind != Kind::Dir {
             return Err(ENOTDIR);
         }
@@ -315,4 +340,10 @@ impl Inode {
 
         Ok(fat_fs.file_writer(self.first_cluster()))
     }
+
+    // pub fn write_back(&self, fat_fs: &FatFs) {
+    //     // let
+
+    //     todo!()
+    // }
 }

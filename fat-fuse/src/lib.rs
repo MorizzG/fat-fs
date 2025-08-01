@@ -143,15 +143,11 @@ impl FatFuse {
 
         debug!("dropping inode {}", ino);
 
-        let Some(removed_inode) = self.inode_table.remove(&ino) else {
+        if self.inode_table.remove(&ino).is_none() {
             error!("tried to drop inode with ino {}, but was not in table", ino);
 
             return;
         };
-
-        if removed_inode.borrow().ino() != ino {
-            error!("removed inode was not expected inode");
-        }
 
         let first_cluster = inode.first_cluster();
 

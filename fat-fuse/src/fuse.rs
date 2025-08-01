@@ -123,9 +123,6 @@ impl Filesystem for FatFuse {
         fh: Option<u64>,
         reply: fuser::ReplyAttr,
     ) {
-        // warn!("[Not Implemented] getattr(ino: {:#x?}, fh: {:#x?})", ino, fh);
-        // reply.error(ENOSYS);
-
         let inode = if let Some(fh) = fh {
             let Some(inode) = self.get_inode_by_fh(fh) else {
                 reply.error(EBADF);
@@ -147,6 +144,7 @@ impl Filesystem for FatFuse {
         reply.attr(&TTL, &attr);
     }
 
+    #[allow(unused_variables)]
     fn setattr(
         &mut self,
         _req: &fuser::Request<'_>,
@@ -165,23 +163,23 @@ impl Filesystem for FatFuse {
         flags: Option<u32>,
         reply: fuser::ReplyAttr,
     ) {
-        debug!(
-            "[Not Implemented] setattr(ino: {:#x?}, mode: {:?}, uid: {:?}, \
-            gid: {:?}, size: {:?}, fh: {:?}, flags: {:?})",
-            ino, mode, uid, gid, size, fh, flags
-        );
-        reply.error(ENOSYS);
-        return;
+        // debug!(
+        //     "[Not Implemented] setattr(ino: {:#x?}, mode: {:?}, uid: {:?}, \
+        //     gid: {:?}, size: {:?}, fh: {:?}, flags: {:?})",
+        //     ino, mode, uid, gid, size, fh, flags
+        // );
+        // reply.error(ENOSYS);
+        // return;
 
         // TODO: implement this properly
-        // let Some(inode) = self.get_inode(ino) else {
-        // debug!("tried to get inode {ino}, but not found");
-        //
-        // reply.error(ENOENT);
-        // return;
-        // };
-        //
-        // reply.attr(&TTL, &inode.file_attr());
+        let Some(inode) = self.get_inode(ino) else {
+            debug!("tried to get inode {ino}, but not found");
+
+            reply.error(ENOENT);
+            return;
+        };
+
+        reply.attr(&TTL, &inode.borrow().file_attr());
     }
 
     fn readlink(&mut self, _req: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyData) {
@@ -286,17 +284,12 @@ impl Filesystem for FatFuse {
         ino: u64,
         fh: u64,
         offset: i64,
-        size: u32,
+        mut size: u32,
         _flags: i32,
         _lock_owner: Option<u64>,
         reply: fuser::ReplyData,
     ) {
-        // warn!(
-        //     "[Not Implemented] read(ino: {:#x?}, fh: {}, offset: {}, size: {}, \
-        //     flags: {:#x?}, lock_owner: {:?})",
-        //     ino, fh, offset, size, flags, lock_owner
-        // );
-        // reply.error(ENOSYS);
+        debug!("trying to read {size} bytes at offset {offset} from inode {ino} (fh: {fh})");
 
         if offset < 0 {
             debug!("tried to read with negative offset {offset}");
@@ -330,6 +323,29 @@ impl Filesystem for FatFuse {
             return;
         }
 
+        let file_size = inode.size();
+
+        debug!("file_size: {}", file_size);
+
+        if offset > file_size {
+            debug!("tried to read after EOF");
+
+            // offset is beyond file size, nothing to do here, just bail
+            reply.data(&[]);
+            return;
+        }
+
+        if offset + size as u64 > file_size {
+            // tried to read beyond end of file, truncate size so we don't overflow
+            debug!(
+                "tried to read {size} bytes at offset {offset} from inode {ino}, but size is only {file_size}"
+            );
+
+            size = (file_size - offset) as u32;
+
+            debug!("truncated read request size to {size}");
+        }
+
         let mut reader = match inode.file_reader(&self.fat_fs) {
             Ok(reader) => reader,
             Err(err) => {
@@ -339,14 +355,14 @@ impl Filesystem for FatFuse {
         };
 
         if reader.skip(offset) != offset {
-            // reader is exhausted, bail
-            reply.data(&[]);
+            // this should not happen as we checked for valid bounds earlier
+            reply.error(EIO);
             return;
         }
 
         let mut buf = vec![0; size as usize];
 
-        let n = match reader.read(&mut buf) {
+        let bytes_read = match reader.read(&mut buf) {
             Ok(n) => n,
             Err(err) => {
                 error!("error while reading: {err}");
@@ -355,10 +371,11 @@ impl Filesystem for FatFuse {
                 return;
             }
         };
+        if bytes_read != size as usize {
+            debug!("expected to read {size} bytes, but only read {bytes_read}");
+        }
 
-        debug!("read {n} bytes");
-
-        reply.data(&buf[..n]);
+        reply.data(&buf[..bytes_read]);
     }
 
     fn write(
@@ -391,7 +408,8 @@ impl Filesystem for FatFuse {
             return;
         };
 
-        let inode = inode.borrow();
+        // borrow mut so we can potentially update the file size later
+        let mut inode = inode.borrow_mut();
 
         if inode.is_read_only() {
             reply.error(EBADF);
@@ -458,12 +476,20 @@ impl Filesystem for FatFuse {
 
         bytes_written += data.len();
 
-        reply.written(bytes_written as u32);
-
-        // TODO: update file size
         if offset + bytes_written as u64 > inode.size() {
-            todo!()
+            debug!("write increased file size, updating...");
+
+            let new_file_size = offset + bytes_written as u64;
+
+            if let Err(err) = inode.update_size(&self.fat_fs, new_file_size) {
+                debug!("error while updating size: {err}");
+
+                reply.error(EIO);
+                return;
+            }
         }
+
+        reply.written(bytes_written as u32);
     }
 
     fn flush(
