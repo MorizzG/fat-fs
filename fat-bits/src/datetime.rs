@@ -46,6 +46,10 @@ impl Date {
         )
     }
 
+    pub fn repr(&self) -> u16 {
+        self.repr
+    }
+
     pub fn day(&self) -> u8 {
         (self.repr & 0x1F) as u8
     }
@@ -95,6 +99,10 @@ impl Time {
         let seconds = (time.second() as u8) & !0x01;
 
         Time::from_seconds_minutes_hours(seconds, time.minute() as u8, time.hour() as u8)
+    }
+
+    pub fn repr(&self) -> u16 {
+        self.repr
     }
 
     pub fn second(&self) -> u8 {

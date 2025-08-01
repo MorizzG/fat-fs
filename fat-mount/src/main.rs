@@ -1,4 +1,4 @@
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::sync::mpsc::channel;
 
 use fat_fuse::FatFuse;
@@ -13,12 +13,13 @@ fn main() -> anyhow::Result<()> {
     let path = args.next().ok_or(anyhow::anyhow!("missing fs path"))?;
     let mountpoint = args.next().ok_or(anyhow::anyhow!("missing mount point"))?;
 
-    let file = File::open(path)?;
+    // let file = File::open(path)?;
+    let file = OpenOptions::new().read(true).write(true).open(path)?;
 
     let fat_fuse = FatFuse::new(file)?;
 
     let options = vec![
-        MountOption::RO,
+        // MountOption::RO,
         MountOption::FSName("fat-fuse".to_owned()),
         MountOption::AutoUnmount,
     ];

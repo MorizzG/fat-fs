@@ -1,6 +1,5 @@
 use fat_bits::FatFs;
 use fat_bits::dir::DirEntry;
-use fat_bits::fat::Fatty as _;
 
 pub fn main() -> anyhow::Result<()> {
     let args = std::env::args();
@@ -21,16 +20,18 @@ pub fn main() -> anyhow::Result<()> {
 
     let fat_fs = FatFs::load(file)?;
 
-    println!("{}", fat_fs.bpb());
-    println!();
-    println!("{}", fat_fs.fat());
+    // println!("{}", fat_fs.bpb());
+    // println!();
+    // println!("{}", fat_fs.fat());
+
+    println!("{}", fat_fs);
     println!();
     println!(
         "free clusters: {} ({} bytes)",
-        fat_fs.fat().count_free_clusters(),
-        fat_fs.fat().count_free_clusters()
-            * fat_fs.bpb().bytes_per_sector() as usize
-            * fat_fs.bpb().sectors_per_cluster() as usize
+        fat_fs.free_clusters(),
+        fat_fs.free_clusters()
+            * fat_fs.bytes_per_sector() as usize
+            * fat_fs.sectors_per_cluster() as usize
     );
 
     println!();

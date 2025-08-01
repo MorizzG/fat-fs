@@ -1,11 +1,11 @@
 use std::cell::{LazyCell, RefCell};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::time::SystemTime;
 
 use chrono::{NaiveDateTime, NaiveTime};
 use fat_bits::FatFs;
 use fat_bits::dir::DirEntry;
-use fat_bits::iter::ClusterChainReader;
+use fat_bits::iter::{ClusterChainReader, ClusterChainWriter};
 use fuser::FileAttr;
 use libc::{EISDIR, ENOTDIR};
 use log::debug;
@@ -27,12 +27,6 @@ fn get_random<T>() -> T
 where
     rand::distr::StandardUniform: rand::distr::Distribution<T>,
 {
-    // RNG.with(|x| unsafe {
-    //     let rng = &mut (*x.get());
-
-    //     rng.random::<u32>()
-    // })
-
     RNG.with(|rng| rng.borrow_mut().random())
 }
 
@@ -53,6 +47,9 @@ impl From<Kind> for fuser::FileType {
 
 pub const ROOT_INO: u64 = 1;
 
+pub type InodeRef = Rc<RefCell<Inode>>;
+pub type InodeWeak = Weak<RefCell<Inode>>;
+
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct Inode {
@@ -63,7 +60,7 @@ pub struct Inode {
 
     ref_count: u64,
 
-    parent_ino: u64,
+    parent: Option<InodeRef>,
 
     size: u64,
     block_size: u32,
@@ -105,7 +102,7 @@ impl Inode {
         uid: u32,
         gid: u32,
         path: impl Into<Rc<str>>,
-        parent_ino: u64,
+        parent: InodeRef,
     ) -> Inode {
         assert!(dir_entry.is_file() || dir_entry.is_dir());
 
@@ -142,9 +139,9 @@ impl Inode {
             ino,
             generation,
             ref_count: 0,
-            parent_ino,
+            parent: Some(parent),
             size: dir_entry.file_size() as u64,
-            block_size: fat_fs.bpb().bytes_per_sector() as u32,
+            block_size: fat_fs.bytes_per_sector() as u32,
             kind,
             read_only: dir_entry.is_readonly(),
             atime,
@@ -158,17 +155,15 @@ impl Inode {
     }
 
     pub fn root_inode(fat_fs: &FatFs, uid: u32, gid: u32) -> Inode {
-        // let generation = Self::new_generation();
-
-        let root_cluster = fat_fs.bpb().root_cluster().unwrap_or(0);
+        let root_cluster = fat_fs.root_cluster().unwrap_or(0);
 
         Inode {
-            ino: 1,
-            generation: 0,
+            ino: ROOT_INO,
+            generation: 0, // root cluster always has constant generation of 0
             ref_count: 0,
-            parent_ino: ROOT_INO, // parent is self
+            parent: None, // parent is self
             size: 0,
-            block_size: fat_fs.bpb().bytes_per_sector() as u32,
+            block_size: fat_fs.bytes_per_sector() as u32,
             kind: Kind::Dir,
             read_only: false,
             atime: SystemTime::UNIX_EPOCH,
@@ -225,8 +220,18 @@ impl Inode {
         self.ref_count
     }
 
-    pub fn parent_ino(&self) -> u64 {
-        self.parent_ino
+    pub fn parent(&self) -> Option<InodeRef> {
+        self.parent.clone()
+    }
+
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    pub fn update_size(&mut self, new_size: u64) {
+        self.size = new_size;
+
+        todo!("update dir entry")
     }
 
     pub fn kind(&self) -> Kind {
@@ -239,6 +244,10 @@ impl Inode {
 
     pub fn is_dir(&self) -> bool {
         self.kind == Kind::Dir
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     pub fn first_cluster(&self) -> u32 {
@@ -297,5 +306,13 @@ impl Inode {
         }
 
         Ok(fat_fs.file_reader(self.first_cluster()))
+    }
+
+    pub fn file_writer<'a>(&'a self, fat_fs: &'a FatFs) -> Result<ClusterChainWriter<'a>, i32> {
+        if self.is_dir() {
+            return Err(EISDIR);
+        }
+
+        Ok(fat_fs.file_writer(self.first_cluster()))
     }
 }

@@ -1,9 +1,10 @@
 use std::cell::RefCell;
+use std::fmt::Display;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::rc::Rc;
 
 use crate::dir::DirIter;
-use crate::fat::{FatError, Fatty};
+use crate::fat::{FatError, FatOps};
 use crate::subslice::{SubSlice, SubSliceMut};
 
 pub mod bpb;
@@ -98,6 +99,16 @@ pub struct FatFs {
     fat: fat::Fat,
 }
 
+impl Display for FatFs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "{}", self.bpb)?;
+        writeln!(f, "")?;
+        writeln!(f, "{}", self.fat)?;
+
+        Ok(())
+    }
+}
+
 unsafe impl Send for FatFs {}
 
 impl FatFs {
@@ -160,88 +171,72 @@ impl FatFs {
         })
     }
 
-    pub fn bpb(&self) -> &bpb::Bpb {
-        &self.bpb
-    }
-
-    pub fn fat(&self) -> &fat::Fat {
-        &self.fat
-    }
-
     /// byte offset of data cluster
-    pub fn data_cluster_to_offset(&self, cluster: u32) -> u64 {
+    fn data_cluster_to_offset(&self, cluster: u32) -> u64 {
         // assert!(cluster >= 2);
 
-        assert!(self.fat().get_valid_clusters().contains(&cluster));
+        assert!(self.fat.valid_clusters().contains(&cluster));
 
         self.data_offset + (cluster - 2) as u64 * self.bytes_per_cluster as u64
+    }
+
+    pub fn free_clusters(&self) -> usize {
+        self.fat.count_free_clusters()
+    }
+
+    pub fn bytes_per_sector(&self) -> u16 {
+        self.bpb.bytes_per_sector()
+    }
+
+    pub fn sectors_per_cluster(&self) -> u8 {
+        self.bpb.sectors_per_cluster()
+    }
+
+    pub fn root_cluster(&self) -> Option<u32> {
+        self.bpb.root_cluster()
     }
 
     /// next data cluster or None is cluster is EOF
     ///
     /// giving an invalid cluster (free, reserved, or defective) returns an appropriate error
     pub fn next_cluster(&self, cluster: u32) -> Result<Option<u32>, FatError> {
-        self.fat().get_next_cluster(cluster)
+        self.fat.get_next_cluster(cluster)
     }
 
-    pub fn cluster_as_subslice_mut(&mut self, cluster: u32) -> SubSliceMut<'_> {
+    pub fn cluster_as_subslice_mut(&self, cluster: u32) -> SubSliceMut {
         if cluster == 0 {
             // for cluster 0 simply return empty subslice
             // this makes things a bit easier, since cluster 0 is used as a marker that a file/dir
             // is empty
 
-            SubSliceMut::new(self, 0, 0);
+            SubSliceMut::new(self.inner.clone(), 0, 0);
         }
 
         let offset = self.data_cluster_to_offset(cluster);
 
-        SubSliceMut::new(self, offset, self.bytes_per_cluster)
+        SubSliceMut::new(self.inner.clone(), offset, self.bytes_per_cluster)
     }
 
-    pub fn cluster_as_subslice(&self, cluster: u32) -> SubSlice<'_> {
+    pub fn cluster_as_subslice(&self, cluster: u32) -> SubSlice {
         if cluster == 0 {
             // for cluster 0 simply return empty subslice
             // this makes things a bit easier, since cluster 0 is used as a marker that a file/dir
             // is empty
 
-            SubSlice::new(self, 0, 0);
+            SubSlice::new(self.inner.clone(), 0, 0);
         }
 
         let offset = self.data_cluster_to_offset(cluster);
 
-        SubSlice::new(self, offset, self.bytes_per_cluster)
-    }
-
-    pub fn root_dir_bytes(&mut self) -> std::io::Result<Vec<u8>> {
-        if let Some(root_dir_offset) = self.root_dir_offset {
-            let mut data = Vec::new();
-
-            let mut subslice = SubSliceMut::new(self, root_dir_offset, self.root_dir_size);
-
-            subslice.read_to_end(&mut data)?;
-
-            return Ok(data);
-        }
-
-        let mut cluster = self.bpb().root_cluster().unwrap();
-
-        let mut data = vec![0; self.bytes_per_cluster];
-
-        let mut inner = self.inner.borrow_mut();
-
-        inner.read_at_offset(self.data_cluster_to_offset(cluster), &mut data)?;
-
-        while let Ok(Some(next_cluster)) = self.next_cluster(cluster) {
-            cluster = next_cluster;
-
-            inner.read_at_offset(self.data_cluster_to_offset(cluster), &mut data)?;
-        }
-
-        Ok(data)
+        SubSlice::new(self.inner.clone(), offset, self.bytes_per_cluster)
     }
 
     fn chain_reader(&'_ self, first_cluster: u32) -> iter::ClusterChainReader<'_> {
         iter::ClusterChainReader::new(self, first_cluster)
+    }
+
+    fn chain_writer(&'_ self, first_cluster: u32) -> iter::ClusterChainWriter<'_> {
+        iter::ClusterChainWriter::new(self, first_cluster)
     }
 
     pub fn root_dir_iter<'a>(&'a self) -> DirIter<Box<dyn Read + 'a>> {
@@ -251,7 +246,7 @@ impl FatFs {
         if let Some(root_dir_offset) = self.root_dir_offset {
             // FAT12/FAT16
 
-            let sub_slice = SubSlice::new(self, root_dir_offset, self.root_dir_size);
+            let sub_slice = SubSlice::new(self.inner.clone(), root_dir_offset, self.root_dir_size);
 
             return DirIter::new(Box::new(sub_slice));
         }
@@ -259,7 +254,7 @@ impl FatFs {
         // FAT32
 
         // can't fail; we're in the FAT32 case
-        let root_cluster = self.bpb().root_cluster().unwrap();
+        let root_cluster = self.bpb.root_cluster().unwrap();
 
         let cluster_iter = iter::ClusterChainReader::new(self, root_cluster);
 
@@ -276,8 +271,16 @@ impl FatFs {
     }
 
     pub fn file_reader(&self, first_cluster: u32) -> iter::ClusterChainReader<'_> {
+        // TODO: needs to take file size into account
         assert!(first_cluster >= 2);
 
         self.chain_reader(first_cluster)
+    }
+
+    pub fn file_writer(&self, first_cluster: u32) -> iter::ClusterChainWriter<'_> {
+        // TODO: needs to take file size into account
+        assert!(first_cluster >= 2);
+
+        self.chain_writer(first_cluster)
     }
 }

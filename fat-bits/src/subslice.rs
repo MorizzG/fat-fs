@@ -1,16 +1,19 @@
+use std::cell::RefCell;
 use std::fmt::Debug;
 use std::io::{Read, Write};
+use std::rc::Rc;
 
-use crate::FatFs;
+use crate::SliceLike;
 
-pub struct SubSliceMut<'a> {
-    fat_fs: &'a mut FatFs,
+pub struct SubSliceMut {
+    // fat_fs: &'a FatFs,
+    data: Rc<RefCell<dyn SliceLike>>,
 
     offset: u64,
     len: usize,
 }
 
-impl Debug for SubSliceMut<'_> {
+impl Debug for SubSliceMut {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SubSliceMut")
             .field("offset", &self.offset)
@@ -19,17 +22,13 @@ impl Debug for SubSliceMut<'_> {
     }
 }
 
-impl SubSliceMut<'_> {
-    pub fn new(fat_fs: &mut FatFs, offset: u64, len: usize) -> SubSliceMut<'_> {
-        SubSliceMut {
-            fat_fs,
-            offset,
-            len,
-        }
+impl SubSliceMut {
+    pub fn new(data: Rc<RefCell<dyn SliceLike>>, offset: u64, len: usize) -> SubSliceMut {
+        SubSliceMut { data, offset, len }
     }
 }
 
-impl SubSliceMut<'_> {
+impl<'a> SubSliceMut {
     pub fn len(&self) -> usize {
         self.len
     }
@@ -37,14 +36,22 @@ impl SubSliceMut<'_> {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    pub fn skip(&mut self, n: usize) -> usize {
+        let n = n.min(self.len());
+
+        self.offset += n as u64;
+        self.len -= n;
+
+        n
+    }
 }
 
-impl Read for SubSliceMut<'_> {
+impl Read for SubSliceMut {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let bytes_to_read = self.len.min(buf.len());
 
-        self.fat_fs
-            .inner
+        self.data
             .borrow_mut()
             .read_at_offset(self.offset, &mut buf[..bytes_to_read])?;
 
@@ -55,12 +62,11 @@ impl Read for SubSliceMut<'_> {
     }
 }
 
-impl Write for SubSliceMut<'_> {
+impl Write for SubSliceMut {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let bytes_to_write = self.len.min(buf.len());
 
-        self.fat_fs
-            .inner
+        self.data
             .borrow_mut()
             .write_at_offset(self.offset, &buf[..bytes_to_write])?;
 
@@ -75,14 +81,14 @@ impl Write for SubSliceMut<'_> {
     }
 }
 
-pub struct SubSlice<'a> {
-    fat_fs: &'a FatFs,
+pub struct SubSlice {
+    data: Rc<RefCell<dyn SliceLike>>,
 
     offset: u64,
     len: usize,
 }
 
-impl Debug for SubSlice<'_> {
+impl Debug for SubSlice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SubSliceMut")
             .field("offset", &self.offset)
@@ -91,17 +97,9 @@ impl Debug for SubSlice<'_> {
     }
 }
 
-impl SubSlice<'_> {
-    pub fn new(fat_fs: &FatFs, offset: u64, len: usize) -> SubSlice<'_> {
-        SubSlice {
-            fat_fs,
-            offset,
-            len,
-        }
-    }
-
-    pub fn fat_fs(&self) -> &FatFs {
-        self.fat_fs
+impl<'a> SubSlice {
+    pub fn new(data: Rc<RefCell<dyn SliceLike>>, offset: u64, len: usize) -> SubSlice {
+        SubSlice { data, offset, len }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -121,19 +119,11 @@ impl SubSlice<'_> {
     }
 }
 
-impl<'a> SubSlice<'a> {
-    /// releases the inner &FatFs, consuming self in the process
-    pub fn release(self) -> &'a FatFs {
-        self.fat_fs
-    }
-}
-
-impl Read for SubSlice<'_> {
+impl Read for SubSlice {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let bytes_to_read = self.len.min(buf.len());
 
-        self.fat_fs
-            .inner
+        self.data
             .borrow_mut()
             .read_at_offset(self.offset, &mut buf[..bytes_to_read])?;
 

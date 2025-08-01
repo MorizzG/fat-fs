@@ -1,15 +1,16 @@
 mod fuse;
 mod inode;
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use fat_bits::dir::DirEntry;
 use fat_bits::{FatFs, SliceLike};
 use fxhash::FxHashMap;
-use log::debug;
+use log::{debug, error};
 
-use crate::inode::Inode;
+use crate::inode::{Inode, InodeRef};
 
 #[allow(dead_code)]
 pub struct FatFuse {
@@ -21,7 +22,7 @@ pub struct FatFuse {
     next_ino: u64,
     next_fh: u64,
 
-    inode_table: BTreeMap<u64, Inode>,
+    inode_table: BTreeMap<u64, InodeRef>,
 
     ino_by_first_cluster: BTreeMap<u32, u64>,
     ino_by_fh: BTreeMap<u64, u64>,
@@ -84,26 +85,28 @@ impl FatFuse {
         fh
     }
 
-    fn insert_inode(&mut self, inode: Inode) -> &mut Inode {
+    fn insert_inode(&mut self, inode: Inode) -> InodeRef {
         let ino = inode.ino();
         let generation = inode.generation();
         let first_cluster = inode.first_cluster();
 
         // let old_inode = self.inode_table.insert(ino, inode);
 
+        let inode = Rc::new(RefCell::new(inode));
+
         let entry = self.inode_table.entry(ino);
 
-        let (new_inode, old_inode): (&mut Inode, Option<Inode>) = match entry {
+        let (new_inode, old_inode) = match entry {
             std::collections::btree_map::Entry::Vacant(vacant_entry) => {
                 let new_inode = vacant_entry.insert(inode);
-                (new_inode, None)
+                (Rc::clone(new_inode), None)
             }
             std::collections::btree_map::Entry::Occupied(occupied_entry) => {
                 let entry_ref = occupied_entry.into_mut();
 
                 let old_inode = std::mem::replace(entry_ref, inode);
 
-                (entry_ref, Some(old_inode))
+                (Rc::clone(entry_ref), Some(old_inode))
             }
         };
 
@@ -113,6 +116,8 @@ impl FatFuse {
         );
 
         if let Some(old_inode) = old_inode {
+            let old_inode = old_inode.borrow();
+
             debug!("ejected inode {} {}", old_inode.ino(), old_inode.generation());
         }
 
@@ -122,21 +127,31 @@ impl FatFuse {
             }
         }
 
-        if let Some(old_ino) = self.ino_by_path.insert(new_inode.path(), ino) {
-            debug!("ejected old {} -> {} path to ino mapping", new_inode.path(), old_ino);
+        let path = new_inode.borrow().path();
+
+        if let Some(old_ino) = self.ino_by_path.insert(Rc::clone(&path), ino) {
+            debug!("ejected old {} -> {} path to ino mapping", path, old_ino);
         }
 
         new_inode
     }
 
-    fn drop_inode(&mut self, ino: u64) {
-        debug!("dropping ino {}", ino);
+    fn drop_inode(&mut self, inode: InodeRef) {
+        let inode = inode.borrow();
 
-        let Some(inode) = self.inode_table.remove(&ino) else {
-            debug!("tried to drop inode with ino {}, but was not in table", ino);
+        let ino = inode.ino();
+
+        debug!("dropping inode {}", ino);
+
+        let Some(removed_inode) = self.inode_table.remove(&ino) else {
+            error!("tried to drop inode with ino {}, but was not in table", ino);
 
             return;
         };
+
+        if removed_inode.borrow().ino() != ino {
+            error!("removed inode was not expected inode");
+        }
 
         let first_cluster = inode.first_cluster();
 
@@ -189,21 +204,10 @@ impl FatFuse {
                 }
             }
         }
-
-        let Some(parent_inode) = self.get_inode_mut(inode.parent_ino()) else {
-            panic!("parent inode {} does not exists anymore", inode.parent_ino());
-        };
-
-        // dec refcount
-        parent_inode.dec_ref_count(1);
     }
 
-    fn get_inode(&self, ino: u64) -> Option<&Inode> {
+    fn get_inode(&self, ino: u64) -> Option<&InodeRef> {
         self.inode_table.get(&ino)
-    }
-
-    fn get_inode_mut(&mut self, ino: u64) -> Option<&mut Inode> {
-        self.inode_table.get_mut(&ino)
     }
 
     fn get_or_make_inode_by_dir_entry(
@@ -211,16 +215,16 @@ impl FatFuse {
         dir_entry: &DirEntry,
         parent_ino: u64,
         parent_path: Rc<str>,
-    ) -> &mut Inode {
+    ) -> InodeRef {
+        // try to find inode by first cluster first
         if dir_entry.first_cluster() != 0
-            && self
-                .get_inode_by_first_cluster_mut(dir_entry.first_cluster())
-                .is_some()
+            && let Some(inode) = self.get_inode_by_first_cluster(dir_entry.first_cluster())
         {
-            return self
-                .get_inode_by_first_cluster_mut(dir_entry.first_cluster())
-                .unwrap();
+            return inode;
         }
+
+        // try to find inode by path
+        // mostly for empty files/directories which have a first cluster of 0
 
         let path = {
             let mut path = parent_path.as_ref().to_owned();
@@ -235,27 +239,25 @@ impl FatFuse {
             path
         };
 
-        if self.get_inode_by_path_mut(&path).is_some() {
-            return self.get_inode_by_path_mut(&path).unwrap();
+        if let Some(inode) = self.get_inode_by_path(&path) {
+            return inode;
         }
 
         // no inode found, make a new one
         let ino = self.next_ino();
 
-        let Some(parent_inode) = self.get_inode_mut(parent_ino) else {
+        let Some(parent_inode) = self.get_inode(parent_ino).cloned() else {
             // TODO: what do we do here? should not happen
             panic!("parent_ino {} does not lead to inode", parent_ino);
         };
 
-        // inc ref of parent
-        parent_inode.inc_ref_count();
-
-        let inode = Inode::new(&self.fat_fs, dir_entry, ino, self.uid, self.gid, path, parent_ino);
+        let inode =
+            Inode::new(&self.fat_fs, dir_entry, ino, self.uid, self.gid, path, parent_inode);
 
         self.insert_inode(inode)
     }
 
-    pub fn get_inode_by_first_cluster(&self, first_cluster: u32) -> Option<&Inode> {
+    pub fn get_inode_by_first_cluster(&self, first_cluster: u32) -> Option<InodeRef> {
         if first_cluster == 0 {
             debug!("trying to get inode by first cluster 0");
 
@@ -265,7 +267,7 @@ impl FatFuse {
         let ino = self.ino_by_first_cluster.get(&first_cluster)?;
 
         if let Some(inode) = self.inode_table.get(ino) {
-            Some(inode)
+            Some(Rc::clone(inode))
         } else {
             debug!(
                 "first cluster {} is mapped to ino {}, but inode is not in table",
@@ -276,31 +278,10 @@ impl FatFuse {
         }
     }
 
-    pub fn get_inode_by_first_cluster_mut(&mut self, first_cluster: u32) -> Option<&mut Inode> {
-        if first_cluster == 0 {
-            debug!("trying to get inode by first cluster 0");
-
-            return None;
-        }
-
-        let ino = self.ino_by_first_cluster.get(&first_cluster)?;
-
-        if let Some(inode) = self.inode_table.get_mut(ino) {
-            Some(inode)
-        } else {
-            debug!(
-                "first cluster {} is mapped to ino {}, but inode is not in table",
-                first_cluster, ino
-            );
-
-            None
-        }
-    }
-
-    pub fn get_inode_by_fh(&self, fh: u64) -> Option<&Inode> {
+    pub fn get_inode_by_fh(&self, fh: u64) -> Option<InodeRef> {
         let ino = *self.ino_by_fh.get(&fh)?;
 
-        if let Some(inode) = self.get_inode(ino) {
+        if let Some(inode) = self.get_inode(ino).cloned() {
             Some(inode)
         } else {
             debug!("fh {} is mapped to ino {}, but inode is not in table", fh, ino);
@@ -309,34 +290,10 @@ impl FatFuse {
         }
     }
 
-    pub fn get_inode_by_fh_mut(&mut self, fh: u64) -> Option<&mut Inode> {
-        let ino = *self.ino_by_fh.get(&fh)?;
-
-        if let Some(inode) = self.get_inode_mut(ino) {
-            Some(inode)
-        } else {
-            debug!("fh {} is mapped to ino {}, but inode is not in table", fh, ino);
-
-            None
-        }
-    }
-
-    pub fn get_inode_by_path(&self, path: &str) -> Option<&Inode> {
+    pub fn get_inode_by_path(&self, path: &str) -> Option<InodeRef> {
         let ino = *self.ino_by_path.get(path)?;
 
-        if let Some(inode) = self.get_inode(ino) {
-            Some(inode)
-        } else {
-            debug!("path {} is mapped to ino {}, but inode is not in table", path, ino);
-
-            None
-        }
-    }
-
-    pub fn get_inode_by_path_mut(&mut self, path: &str) -> Option<&mut Inode> {
-        let ino = *self.ino_by_path.get(path)?;
-
-        if let Some(inode) = self.get_inode_mut(ino) {
+        if let Some(inode) = self.get_inode(ino).cloned() {
             Some(inode)
         } else {
             debug!("path {} is mapped to ino {}, but inode is not in table", path, ino);

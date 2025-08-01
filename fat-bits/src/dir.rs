@@ -1,5 +1,5 @@
 use std::fmt::Display;
-use std::io::Read;
+use std::io::{Read, Write};
 
 use bitflags::bitflags;
 use chrono::{NaiveDate, NaiveDateTime, TimeDelta};
@@ -199,6 +199,58 @@ impl DirEntry {
         })
     }
 
+    pub fn write(&self, mut writer: impl Write) -> std::io::Result<()> {
+        let mut buf = [0; 32];
+
+        let mut name = self.name();
+
+        if name[0] == b'.' && self.is_hidden() {
+            name = &name[1..];
+        }
+
+        if let Some((idx, _)) = name
+            .iter()
+            .copied()
+            .enumerate()
+            .rev()
+            .find(|&(_n, u)| u == b'.')
+        {
+            let (stem, ext) = name.split_at(idx);
+
+            buf[..8][..stem.len()].copy_from_slice(stem);
+            buf[8..][..ext.len()].copy_from_slice(ext);
+
+            // (stem, Some(ext))
+        } else {
+            // all stem, no ext
+            buf[..8][..name.len()].copy_from_slice(name);
+        }
+
+        buf[11] = self.attr().bits();
+
+        buf[12] = 0;
+
+        buf[13] = self.create_time_tenths;
+        buf[13..15].copy_from_slice(&self.create_time.repr().to_le_bytes());
+
+        buf[16..18].copy_from_slice(&self.create_date.repr().to_le_bytes());
+
+        buf[18..20].copy_from_slice(&self.last_access_date.repr().to_le_bytes());
+
+        buf[20..22].copy_from_slice(&((self.first_cluster() >> 16) as u16).to_le_bytes());
+
+        buf[22..24].copy_from_slice(&self.write_time.repr().to_le_bytes());
+        buf[24..26].copy_from_slice(&self.write_date.repr().to_le_bytes());
+
+        buf[26..28].copy_from_slice(&(self.first_cluster as u16).to_le_bytes());
+
+        buf[28..].copy_from_slice(&self.file_size.to_le_bytes());
+
+        writer.write_all(&buf)?;
+
+        Ok(())
+    }
+
     /// indicates this DirEntry is empty
     ///
     /// can be either simply empty (0xe5) or the sentinel (0x00) that indicates that all following
@@ -247,7 +299,13 @@ impl DirEntry {
     }
 
     pub fn name(&self) -> &[u8] {
-        &self.name
+        let mut name: &[u8] = &self.name;
+
+        while let Some(&0) = name.last() {
+            name = &name[..name.len() - 1];
+        }
+
+        name
     }
 
     pub fn stem(&self) -> &[u8] {
