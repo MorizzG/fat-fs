@@ -2,8 +2,10 @@ use std::cell::RefCell;
 use std::fmt::Display;
 use std::rc::Rc;
 
+use log::debug;
+
 use crate::dir::DirIter;
-use crate::fat::{FatError, FatOps};
+use crate::fat::FatError;
 use crate::iter::ClusterChainReader;
 pub use crate::slice_like::SliceLike;
 use crate::subslice::{SubSlice, SubSliceMut};
@@ -56,6 +58,20 @@ impl Display for FatFs {
 }
 
 unsafe impl Send for FatFs {}
+
+impl Drop for FatFs {
+    fn drop(&mut self) {
+        let fat_slice = SubSliceMut::new(
+            Rc::clone(&self.inner),
+            self.bpb.fat_offset(),
+            self.bpb.fat_len_bytes(),
+        );
+
+        if let Err(err) = self.fat.write_back(fat_slice) {
+            debug!("writing FAT back to disk failed: {err}");
+        }
+    }
+}
 
 impl FatFs {
     pub fn load<S>(data: S) -> anyhow::Result<FatFs>
@@ -123,18 +139,14 @@ impl FatFs {
     }
 
     pub fn fat_type(&self) -> FatType {
-        match &self.fat {
-            fat::Fat::Fat12(_) => FatType::Fat12,
-            fat::Fat::Fat16(_) => FatType::Fat16,
-            fat::Fat::Fat32(_) => FatType::Fat32,
-        }
+        self.fat.fat_type()
     }
 
     /// byte offset of data cluster
     fn data_cluster_to_offset(&self, cluster: u32) -> u64 {
         // assert!(cluster >= 2);
 
-        assert!(self.fat.valid_entries().contains(&cluster));
+        // assert!(self.fat.valid_entries().contains(&cluster));
 
         self.data_offset + (cluster - 2) as u64 * self.bytes_per_cluster as u64
     }
@@ -144,14 +156,20 @@ impl FatFs {
         self.free_count
     }
 
-    pub fn alloc_cluster(&mut self) -> Option<u32> {
-        let Some(cluster) = self.next_free else {
+    pub fn alloc_cluster(&mut self, prev_cluster: Option<u32>) -> Option<u32> {
+        let Some(new_cluster) = self.next_free else {
             // no free cluster
             return None;
         };
 
-        // set cluster as taken
-        self.fat.set_entry(cluster, self.fat.eof_entry());
+        debug!("next free cluster: {new_cluster}");
+
+        // set cluster as EOF
+        self.fat.set_next_cluster(new_cluster, None);
+
+        if let Some(prev_cluster) = prev_cluster {
+            self.fat.set_next_cluster(prev_cluster, Some(new_cluster));
+        }
 
         // something went terribly wrong
         assert_ne!(self.free_count, 0);
@@ -161,18 +179,12 @@ impl FatFs {
         // find next free cluster
         self.next_free = self.fat.first_free_cluster();
 
-        Some(cluster)
+        Some(new_cluster)
     }
 
     pub fn dealloc_cluster(&mut self, cluster: u32) {
         // assert cluster is actually valid
-        assert!(
-            self.fat
-                .valid_entries()
-                .contains(&self.fat.get_entry(cluster))
-        );
-
-        self.fat.set_entry(cluster, 0);
+        self.fat.free_cluster(cluster);
 
         if self.next_free.is_none() || self.next_free.unwrap() > cluster {
             self.next_free = Some(cluster);
@@ -240,7 +252,7 @@ impl FatFs {
         iter::ClusterChainReader::new(self, first_cluster)
     }
 
-    fn chain_writer(&'_ self, first_cluster: u32) -> iter::ClusterChainWriter<'_> {
+    fn chain_writer(&'_ mut self, first_cluster: u32) -> iter::ClusterChainWriter<'_> {
         iter::ClusterChainWriter::new(self, first_cluster)
     }
 
@@ -263,7 +275,7 @@ impl FatFs {
         self.chain_reader(first_cluster)
     }
 
-    pub fn file_writer(&self, first_cluster: u32) -> iter::ClusterChainWriter<'_> {
+    pub fn file_writer(&mut self, first_cluster: u32) -> iter::ClusterChainWriter<'_> {
         // TODO: needs to take file size into account
         assert!(first_cluster >= 2);
 

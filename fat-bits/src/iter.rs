@@ -1,5 +1,7 @@
 use std::io::{Read, Write};
 
+use log::debug;
+
 use crate::subslice::{SubSlice, SubSliceMut};
 use crate::{FatFs, FatType};
 
@@ -96,27 +98,28 @@ impl Read for ClusterChainReader<'_> {
 }
 
 pub struct ClusterChainWriter<'a> {
-    fat_fs: &'a FatFs,
+    fat_fs: &'a mut FatFs,
 
     sub_slice: SubSliceMut,
 
-    next_cluster: Option<u32>,
+    // next_cluster: Option<u32>,
+    cur_cluster: u32,
 }
 
 impl<'a> ClusterChainWriter<'a> {
-    pub fn new(fat_fs: &'a FatFs, first_cluster: u32) -> Self {
-        let next_cluster = fat_fs.next_cluster(first_cluster).unwrap_or(None);
+    pub fn new(fat_fs: &'a mut FatFs, first_cluster: u32) -> Self {
+        // let next_cluster = fat_fs.next_cluster(first_cluster).unwrap_or(None);
 
         let sub_slice = fat_fs.cluster_as_subslice_mut(first_cluster);
 
         ClusterChainWriter {
             fat_fs,
             sub_slice,
-            next_cluster,
+            cur_cluster: first_cluster,
         }
     }
 
-    pub fn root_dir_writer(fat_fs: &'a FatFs) -> Self {
+    pub fn root_dir_writer(fat_fs: &'a mut FatFs) -> Self {
         match fat_fs.fat_type() {
             FatType::Fat12 | FatType::Fat16 => {
                 // fixed root dir, so no need to chain
@@ -127,7 +130,7 @@ impl<'a> ClusterChainWriter<'a> {
                 ClusterChainWriter {
                     fat_fs,
                     sub_slice,
-                    next_cluster: None,
+                    cur_cluster: 0,
                 }
             }
             FatType::Fat32 => {
@@ -140,12 +143,38 @@ impl<'a> ClusterChainWriter<'a> {
 
     fn move_to_next_cluster(&mut self) -> bool {
         // TODO: should allocate a new cluster here!
-        let Some(next_cluster) = self.next_cluster else {
+        // let Some(next_cluster) = self.next_cluster else {
+        //     let Some(new_cluster) = self.fat_fs.alloc_cluster() else {
+        //         // cluster allocation failed
+        //         return false;
+        //     };
+
+        //     return false;
+        // };
+
+        let Some(next_cluster) = self
+            .fat_fs
+            .next_cluster(self.cur_cluster)
+            .map_err(|err| {
+                debug!("failed to get next cluster: {err}");
+                err
+            })
+            .unwrap_or(None)
+            .or_else(|| {
+                debug!("allocating new cluster");
+
+                self.fat_fs.alloc_cluster(Some(self.cur_cluster))
+            })
+        else {
+            debug!("failed to allocate next cluster");
+
             return false;
         };
 
-        self.next_cluster = self.fat_fs.next_cluster(next_cluster).unwrap_or(None);
+        debug!("next cluster: {next_cluster}");
+
         self.fat_fs.cluster_as_subslice_mut(next_cluster);
+        self.cur_cluster = next_cluster;
 
         true
     }

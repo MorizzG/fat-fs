@@ -213,7 +213,8 @@ impl DirEntry {
 
         buf[28..].copy_from_slice(&self.file_size.to_le_bytes());
 
-        eprintln!("writing new dir entry: {:?}", buf);
+        debug!("self: {self:?}");
+        debug!("writing new dir entry: {:?}", buf);
 
         writer.write_all(&buf)?;
 

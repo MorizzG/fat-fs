@@ -4,9 +4,12 @@ use std::mem::MaybeUninit;
 use std::ops::RangeInclusive;
 
 use enum_dispatch::enum_dispatch;
+use log::debug;
 
 use crate::FatType;
 use crate::subslice::SubSliceMut;
+
+const FREE_ENTRY: u32 = 0;
 
 #[derive(Debug, thiserror::Error)]
 pub enum FatError {
@@ -21,7 +24,7 @@ pub enum FatError {
 }
 
 #[enum_dispatch]
-pub trait FatOps {
+trait FatOps {
     // get the next cluster
     // assumes the cluster is valid, i.e. allocated
     fn get_entry(&self, cluster: u32) -> u32;
@@ -33,23 +36,12 @@ pub trait FatOps {
     fn reserved_eof_entries(&self) -> RangeInclusive<u32>;
     fn eof_entry(&self) -> u32;
 
-    fn count_free_clusters(&self) -> u32 {
-        self.valid_entries()
-            .map(|cluster| self.get_entry(cluster))
-            .filter(|&entry| entry == 0)
-            .count() as u32
-    }
-
-    fn first_free_cluster(&self) -> Option<u32> {
-        self.valid_entries()
-            .map(|cluster| self.get_entry(cluster))
-            .find(|&entry| entry == 0)
-    }
-
     fn write_to_disk(&self, sub_slice: SubSliceMut) -> std::io::Result<()>;
 }
 
 #[enum_dispatch(FatOps)]
+// others should never touch the inner FatNs directly, but instead go through the Fat type
+#[allow(private_interfaces)]
 pub enum Fat {
     Fat12(Fat12),
     Fat16(Fat16),
@@ -75,8 +67,16 @@ impl Fat {
         }
     }
 
+    pub fn fat_type(&self) -> FatType {
+        match self {
+            Fat::Fat12(_) => FatType::Fat12,
+            Fat::Fat16(_) => FatType::Fat16,
+            Fat::Fat32(_) => FatType::Fat32,
+        }
+    }
+
     pub fn get_next_cluster(&self, cluster: u32) -> Result<Option<u32>, FatError> {
-        if cluster == 0x000 {
+        if cluster == FREE_ENTRY {
             // can't get next cluster for free cluster
             return Err(FatError::FreeCluster);
         }
@@ -104,21 +104,117 @@ impl Fat {
 
         let entry = self.get_entry(cluster);
 
-        // interpret second reserved block as EOF here
-        if entry == self.eof_entry() || self.reserved_eof_entries().contains(&entry) {
-            return Ok(None);
+        if entry == FREE_ENTRY {
+            Ok(None)
+        } else if entry == self.eof_entry() {
+            Ok(None)
+        } else if self.valid_entries().contains(&entry) {
+            Ok(Some(entry))
+        } else if self.reserved_entries().contains(&entry) || entry == 1 {
+            Err(FatError::ReservedCluster(entry))
+        } else if entry == self.defective_entry() {
+            Err(FatError::DefectiveCluster)
+        } else {
+            unreachable!()
+        }
+    }
+
+    /// set the next cluster of `cluster` to either some `next_cluster` or EOF
+    ///
+    /// if `cluster` currently points to another cluster, that cluster MUST be the EOF and will be
+    /// freed
+    pub fn set_next_cluster(&mut self, cluster: u32, next_cluster: Option<u32>) {
+        assert!(self.valid_entries().contains(&cluster));
+
+        let cur_next_cluster = self.get_entry(cluster);
+
+        // can't be defective
+        assert_ne!(cur_next_cluster, self.defective_entry());
+
+        if self.valid_entries().contains(&cur_next_cluster) {
+            // cluster currently points to a valid cluster, so we free it
+
+            log::debug!("freeing chain beginning at {cluster}");
+            self.free_chain(cluster);
         }
 
-        // entry should be in the valid cluster range here; otherwise something went wrong
-        if !self.valid_entries().contains(&entry) {
-            return Err(FatError::InvalidEntry(entry));
+        if let Some(next_cluster) = next_cluster {
+            assert!(self.valid_entries().contains(&next_cluster));
         }
 
-        Ok(Some(entry))
+        if let Some(next_cluster) = next_cluster {
+            log::debug!("setting {cluster} -> {next_cluster}");
+        } else {
+            log::debug!("setting {cluster} EOF");
+        }
+
+        self.set_entry(cluster, next_cluster.unwrap_or(self.eof_entry()));
+    }
+
+    /// free a cluster
+    ///
+    /// must be EOF
+    pub fn free_cluster(&mut self, cluster: u32) {
+        debug!("freeing cluster {cluster}");
+
+        let entry = self.get_entry(cluster);
+
+        if entry == FREE_ENTRY {
+            // nothing to be done here
+            debug!("cluster was already free");
+            return;
+        }
+
+        // can't be reserved or defective
+        // can't be pointing to another cluster (we'd orphan that one)
+        // use free_chain to free a chain of clusters iteratively
+        assert!(self.is_eof(entry));
+
+        self.set_entry(cluster, FREE_ENTRY);
+    }
+
+    /// free `first_cluster` and all following clusters
+    pub fn free_chain(&mut self, mut first_cluster: u32) {
+        debug!("freeing chaing at {first_cluster}");
+
+        loop {
+            let entry = self.get_entry(first_cluster);
+
+            // assert cluster either points to another cluster of is the EOF
+            assert!(self.valid_entries().contains(&entry) || self.is_eof(entry));
+
+            self.set_entry(first_cluster, FREE_ENTRY);
+
+            if self.valid_entries().contains(&entry) {
+                first_cluster = entry;
+            } else {
+                break;
+            }
+        }
+    }
+
+    pub fn count_free_clusters(&self) -> u32 {
+        self.valid_entries()
+            .map(|cluster| self.get_entry(cluster))
+            .filter(|&entry| entry == FREE_ENTRY)
+            .count() as u32
+    }
+
+    pub fn first_free_cluster(&self) -> Option<u32> {
+        self.valid_entries()
+            .find(|&cluster| self.get_entry(cluster) == FREE_ENTRY)
+    }
+
+    fn is_eof(&self, entry: u32) -> bool {
+        entry == self.eof_entry() || self.reserved_eof_entries().contains(&entry)
+    }
+
+    pub fn write_back(&self, sub_slice: SubSliceMut) -> std::io::Result<()> {
+        self.write_to_disk(sub_slice)
     }
 }
 
-pub struct Fat12 {
+struct Fat12 {
     max: u32,
 
     next_sectors: Box<[u16]>,
@@ -129,7 +225,7 @@ impl Display for Fat12 {
         writeln!(f, "Fat 12 {{")?;
 
         for (i, &x) in self.next_sectors.iter().enumerate() {
-            if x != 0 {
+            if x != FREE_ENTRY as u16 {
                 writeln!(f, "    0x{:03X} -> 0x{:03X}", i, x)?;
             }
         }
@@ -155,7 +251,10 @@ impl Fat12 {
 
         // assume bytes.len() is multiple of 3
         // TODO: fix later
-        assert_eq!(bytes.len() % 3, 0);
+        // assert_eq!(bytes.len() % 3, 0);
+        assert_eq!(max % 2, 0);
+
+        let bytes = &bytes[..next_sectors.len() / 2 * 3];
 
         let (chunks, rem) = bytes.as_chunks::<3>();
 
@@ -222,11 +321,9 @@ impl FatOps for Fat12 {
     }
 
     fn write_to_disk(&self, mut sub_slice: SubSliceMut) -> std::io::Result<()> {
-        // TODO: currently assumed FAT has even number of entries
+        assert!(2 * sub_slice.len() > 3 * self.next_sectors.len());
 
-        assert_eq!(3 * sub_slice.len(), self.next_sectors.len());
-
-        let mut iter = self.next_sectors.chunks_exact(3);
+        let mut iter = self.next_sectors.chunks_exact(2);
 
         let mut buf: [u8; 3];
 
@@ -255,13 +352,18 @@ impl FatOps for Fat12 {
             sub_slice.write_all(&buf)?;
         }
 
-        assert_eq!(iter.remainder().len(), 0);
+        match iter.remainder() {
+            [] => {}
+            [x] => sub_slice.write_all(&x.to_le_bytes())?,
+
+            _ => unreachable!(),
+        }
 
         Ok(())
     }
 }
 
-pub struct Fat16 {
+struct Fat16 {
     max: u32,
 
     next_sectors: Box<[u16]>,
@@ -272,7 +374,7 @@ impl Display for Fat16 {
         writeln!(f, "Fat 16 {{")?;
 
         for (i, &x) in self.next_sectors.iter().enumerate() {
-            if x != 0 {
+            if x != FREE_ENTRY as u16 {
                 writeln!(f, "    0x{:03X} -> 0x{:03X}", i, x)?;
             }
         }
@@ -359,7 +461,7 @@ impl FatOps for Fat16 {
     }
 }
 
-pub struct Fat32 {
+struct Fat32 {
     max: u32,
 
     next_sectors: Box<[u32]>,
@@ -370,7 +472,7 @@ impl Display for Fat32 {
         writeln!(f, "Fat 32 {{")?;
 
         for (i, &x) in self.next_sectors.iter().enumerate() {
-            if x != 0 {
+            if x != FREE_ENTRY {
                 writeln!(f, "    0x{:03X} -> 0x{:03X}", i, x)?;
             }
         }

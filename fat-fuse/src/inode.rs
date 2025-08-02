@@ -320,7 +320,7 @@ impl Inode {
         Ok(fat_fs.file_reader(self.first_cluster()))
     }
 
-    pub fn file_writer<'a>(&'a self, fat_fs: &'a FatFs) -> Result<ClusterChainWriter<'a>, i32> {
+    pub fn file_writer<'a>(&'a self, fat_fs: &'a mut FatFs) -> Result<ClusterChainWriter<'a>, i32> {
         if self.is_dir() {
             return Err(EISDIR);
         }
@@ -329,22 +329,43 @@ impl Inode {
     }
 
     pub fn update_size(&mut self, new_size: u64) {
+        debug!("updating size to {new_size}");
+
+        if new_size == self.size {
+            return;
+        }
+
         self.size = new_size;
         self.dirty = true;
     }
 
     pub fn update_atime(&mut self, atime: SystemTime) {
+        if self.atime == atime {
+            return;
+        }
+
         self.atime = atime;
         self.dirty = true;
     }
 
     pub fn update_mtime(&mut self, mtime: SystemTime) {
+        if self.mtime == mtime {
+            return;
+        }
+
         self.mtime = mtime;
         self.dirty = true;
     }
 
     pub fn write_back(&mut self, fat_fs: &FatFs) -> anyhow::Result<()> {
         if !self.dirty {
+            return Ok(());
+        }
+
+        if self.is_root() {
+            // root dir has no attributes
+
+            self.dirty = false;
             return Ok(());
         }
 

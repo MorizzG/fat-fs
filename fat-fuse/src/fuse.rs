@@ -117,11 +117,11 @@ impl Filesystem for FatFuse {
         let attr = inode.file_attr();
         let generation = inode.generation();
 
+        debug!("attr: {attr:?}");
+
         reply.entry(&TTL, &attr, generation as u64);
 
         inode.inc_ref_count();
-
-        // TODO: update access time
     }
 
     fn forget(&mut self, _req: &fuser::Request<'_>, ino: u64, nlookup: u64) {
@@ -165,6 +165,14 @@ impl Filesystem for FatFuse {
         let attr = inode.file_attr();
 
         inode.update_atime(SystemTime::now());
+        if let Err(err) = inode.write_back(&self.fat_fs) {
+            debug!("error while writing back inode: {err}");
+
+            reply.error(EIO);
+            return;
+        }
+
+        debug!("attr: {attr:?}");
 
         reply.attr(&TTL, &attr);
     }
@@ -515,7 +523,7 @@ impl Filesystem for FatFuse {
 
         let offset = offset as u64;
 
-        let Some(inode) = self.get_inode_by_fh(fh) else {
+        let Some(inode) = self.get_inode_by_fh(fh).cloned() else {
             debug!("no inode associated with fh {fh} (given ino: {ino}");
 
             reply.error(EBADF);
@@ -544,18 +552,13 @@ impl Filesystem for FatFuse {
             return;
         }
 
-        let mut writer = match inode.file_writer(&self.fat_fs) {
+        let mut writer = match inode.file_writer(&mut self.fat_fs) {
             Ok(writer) => writer,
             Err(err) => {
                 reply.error(err);
                 return;
             }
         };
-
-        // if writer.skip(offset) != offset {
-        //     // writer is at EOF, bail
-
-        // }
 
         let cur_offset = writer.skip(offset);
 
