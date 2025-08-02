@@ -190,32 +190,7 @@ impl DirEntry {
     fn write(&self, mut writer: impl Write) -> std::io::Result<()> {
         let mut buf = [0; 32];
 
-        // fill name with 0x20
-        buf[..11].copy_from_slice(&[0x20; 11]);
-
-        let mut name = self.name();
-
-        if name[0] == b'.' && self.is_hidden() {
-            name = &name[1..];
-        }
-
-        if let Some((idx, _)) = name
-            .iter()
-            .copied()
-            .enumerate()
-            .rev()
-            .find(|&(_n, u)| u == b'.')
-        {
-            let (stem, ext) = name.split_at(idx);
-
-            buf[..8][..stem.len()].copy_from_slice(stem);
-            buf[8..][..ext.len()].copy_from_slice(ext);
-
-            // (stem, Some(ext))
-        } else {
-            // all stem, no ext
-            buf[..8][..name.len()].copy_from_slice(name);
-        }
+        buf[..11].copy_from_slice(self.name());
 
         buf[11] = self.attr().bits();
 
