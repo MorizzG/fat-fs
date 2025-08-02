@@ -1,8 +1,8 @@
 use std::time::SystemTime;
 
-use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Timelike, Utc};
+use chrono::{DateTime, Datelike, Local, NaiveDate, NaiveTime, Timelike};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Date {
     repr: u16,
 }
@@ -22,8 +22,7 @@ impl Date {
         Ok(date)
     }
 
-    #[allow(dead_code)]
-    pub fn from_day_month_year(day: u8, month: u8, year: u16) -> anyhow::Result<Date> {
+    fn from_day_month_year(day: u8, month: u8, year: u16) -> anyhow::Result<Date> {
         anyhow::ensure!(day <= 31, "invalid day: {}", day);
         anyhow::ensure!(month <= 12, "invalid month: {}", month);
         anyhow::ensure!(1980 <= year && year <= 2107, "invalid year: {}", year);
@@ -33,10 +32,7 @@ impl Date {
         Ok(Date { repr })
     }
 
-    #[allow(dead_code)]
-    pub fn from_system_time(time: SystemTime) -> anyhow::Result<Date> {
-        let datetime: DateTime<Utc> = time.into();
-
+    pub fn from_datetime(datetime: DateTime<Local>) -> anyhow::Result<Date> {
         let date = datetime.date_naive();
 
         Date::from_day_month_year(
@@ -67,7 +63,7 @@ impl Date {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct Time {
     repr: u16,
 }
@@ -79,8 +75,7 @@ impl Time {
         Ok(time)
     }
 
-    #[allow(dead_code)]
-    pub fn from_seconds_minutes_hours(seconds: u8, minutes: u8, hours: u8) -> anyhow::Result<Time> {
+    fn from_seconds_minutes_hours(seconds: u8, minutes: u8, hours: u8) -> anyhow::Result<Time> {
         anyhow::ensure!(seconds <= 58 && seconds % 2 == 0, "invalid seconds: {}", seconds);
         anyhow::ensure!(minutes <= 59, "invalid minutes: {}", minutes);
         anyhow::ensure!(hours <= 23, "invalid hours: {}", hours);
@@ -90,10 +85,7 @@ impl Time {
         Ok(Time { repr })
     }
 
-    #[allow(dead_code)]
-    pub fn from_system_time(time: SystemTime) -> anyhow::Result<Time> {
-        let datetime: DateTime<Utc> = time.into();
-
+    pub fn from_datetime(datetime: DateTime<Local>) -> anyhow::Result<Time> {
         let time = datetime.time();
 
         let seconds = (time.second() as u8) & !0x01;

@@ -1,15 +1,53 @@
 use std::ffi::c_int;
 use std::io::{Read, Write};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
+use bitflags::bitflags;
 use fat_bits::dir::DirEntry;
 use fuser::{FileType, Filesystem};
-use libc::{EBADF, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR};
+use libc::{EACCES, EBADF, EINVAL, EIO, EISDIR, ENOENT, ENOSYS, ENOTDIR};
 use log::{debug, error};
 
 use crate::FatFuse;
+use crate::inode::InodeRef;
 
 const TTL: Duration = Duration::from_secs(1);
+
+bitflags! {
+    #[derive(Debug)]
+    struct OpenFlags: i32 {
+        const ReadOnly = libc::O_RDONLY;
+        const WriteOnly = libc::O_WRONLY;
+        const ReadWrite = libc::O_RDWR;
+
+        const Read = libc::O_RDONLY | libc::O_RDWR;
+        const Write = libc::O_WRONLY | libc::O_RDWR;
+
+        const Append = libc::O_APPEND;
+        const Create = libc::O_CREAT;
+        const Exclusive = libc::O_EXCL;
+        const Truncate = libc::O_TRUNC;
+
+        const _ = !0;
+    }
+}
+
+fn get_inode_by_fh_or_ino(fat_fuse: &FatFuse, fh: Option<u64>, ino: u64) -> Result<&InodeRef, i32> {
+    fh.map(|fh| {
+        let inode = fat_fuse.get_inode_by_fh(fh).ok_or(EBADF)?;
+
+        let found_ino = inode.borrow().ino();
+
+        if found_ino != ino {
+            debug!("inode associated with fh {} has ino {}, but expected {ino}", fh, found_ino);
+
+            return Err(EBADF);
+        }
+
+        Ok(inode)
+    })
+    .unwrap_or_else(|| fat_fuse.get_inode(ino).ok_or(ENOENT))
+}
 
 impl Filesystem for FatFuse {
     fn init(
@@ -82,6 +120,8 @@ impl Filesystem for FatFuse {
         reply.entry(&TTL, &attr, generation as u64);
 
         inode.inc_ref_count();
+
+        // TODO: update access time
     }
 
     fn forget(&mut self, _req: &fuser::Request<'_>, ino: u64, nlookup: u64) {
@@ -112,63 +152,81 @@ impl Filesystem for FatFuse {
         fh: Option<u64>,
         reply: fuser::ReplyAttr,
     ) {
-        let inode = if let Some(fh) = fh {
-            let Some(inode) = self.get_inode_by_fh(fh) else {
-                reply.error(EBADF);
+        let inode = match get_inode_by_fh_or_ino(self, fh, ino) {
+            Ok(inode) => inode,
+            Err(err) => {
+                reply.error(err);
                 return;
-            };
-
-            inode
-        } else if let Some(inode) = self.get_inode(ino).cloned() {
-            inode
-        } else {
-            reply.error(ENOENT);
-            return;
+            }
         };
 
-        let inode = inode.borrow();
+        let mut inode = inode.borrow_mut();
 
         let attr = inode.file_attr();
+
+        inode.update_atime(SystemTime::now());
 
         reply.attr(&TTL, &attr);
     }
 
-    #[allow(unused_variables)]
     fn setattr(
         &mut self,
         _req: &fuser::Request<'_>,
         ino: u64,
-        mode: Option<u32>,
-        uid: Option<u32>,
-        gid: Option<u32>,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
         size: Option<u64>,
-        _atime: Option<fuser::TimeOrNow>,
-        _mtime: Option<fuser::TimeOrNow>,
+        atime: Option<fuser::TimeOrNow>,
+        mtime: Option<fuser::TimeOrNow>,
         _ctime: Option<std::time::SystemTime>,
         fh: Option<u64>,
         _crtime: Option<std::time::SystemTime>,
         _chgtime: Option<std::time::SystemTime>,
         _bkuptime: Option<std::time::SystemTime>,
-        flags: Option<u32>,
+        _flags: Option<u32>,
         reply: fuser::ReplyAttr,
     ) {
-        // debug!(
-        //     "[Not Implemented] setattr(ino: {:#x?}, mode: {:?}, uid: {:?}, \
-        //     gid: {:?}, size: {:?}, fh: {:?}, flags: {:?})",
-        //     ino, mode, uid, gid, size, fh, flags
-        // );
-        // reply.error(ENOSYS);
-        // return;
-
-        // TODO: implement this properly
-        let Some(inode) = self.get_inode(ino) else {
-            debug!("tried to get inode {ino}, but not found");
-
-            reply.error(ENOENT);
-            return;
+        let inode = match get_inode_by_fh_or_ino(self, fh, ino) {
+            Ok(inode) => inode,
+            Err(err) => {
+                reply.error(err);
+                return;
+            }
         };
 
-        reply.attr(&TTL, &inode.borrow().file_attr());
+        let mut inode = inode.borrow_mut();
+
+        if let Some(new_size) = size {
+            inode.update_size(new_size);
+        }
+
+        if let Some(atime) = atime {
+            let atime = match atime {
+                fuser::TimeOrNow::SpecificTime(system_time) => system_time,
+                fuser::TimeOrNow::Now => SystemTime::now(),
+            };
+
+            inode.update_atime(atime);
+        }
+
+        if let Some(mtime) = mtime {
+            let mtime = match mtime {
+                fuser::TimeOrNow::SpecificTime(system_time) => system_time,
+                fuser::TimeOrNow::Now => SystemTime::now(),
+            };
+
+            inode.update_mtime(mtime);
+        }
+
+        if let Err(err) = inode.write_back(&self.fat_fs) {
+            debug!("writing back inode failed: {err}");
+
+            reply.error(EIO);
+            return;
+        }
+
+        reply.attr(&TTL, &inode.file_attr());
     }
 
     fn readlink(&mut self, _req: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyData) {
@@ -281,9 +339,29 @@ impl Filesystem for FatFuse {
         reply.error(ENOSYS);
     }
 
-    fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, _flags: i32, reply: fuser::ReplyOpen) {
+    fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
         if !self.inode_table.contains_key(&ino) {
             reply.error(ENOENT);
+            return;
+        }
+
+        let flags = OpenFlags::from_bits_truncate(flags);
+
+        debug!("flags: {flags:?}");
+
+        let Some(inode) = self.get_inode(ino).cloned() else {
+            debug!("inode {ino} not found");
+
+            reply.error(ENOENT);
+            return;
+        };
+
+        let mut inode = inode.borrow_mut();
+
+        if flags.intersects(OpenFlags::Write) && inode.is_read_only() {
+            debug!("tried to open read-only inode {ino} with write access");
+
+            reply.error(EACCES);
             return;
         }
 
@@ -294,6 +372,18 @@ impl Filesystem for FatFuse {
         }
 
         debug!("opened inode {}: fh {}", ino, fh);
+
+        if flags.contains(OpenFlags::Truncate) {
+            inode.update_size(0);
+            inode.update_mtime(SystemTime::now());
+
+            if let Err(err) = inode.write_back(&self.fat_fs) {
+                debug!("writing back inode failed: {err}");
+
+                reply.error(EIO);
+                return;
+            }
+        }
 
         reply.opened(fh, 0);
     }
@@ -327,7 +417,7 @@ impl Filesystem for FatFuse {
             return;
         };
 
-        let inode = inode.borrow();
+        let mut inode = inode.borrow_mut();
 
         if inode.ino() != ino {
             debug!("fh {fh} is associated with inode {} instead of {ino}", inode.ino());
@@ -395,7 +485,11 @@ impl Filesystem for FatFuse {
             debug!("expected to read {size} bytes, but only read {bytes_read}");
         }
 
+        inode.update_atime(SystemTime::now());
+
         reply.data(&buf[..bytes_read]);
+
+        // TODO: update access time
     }
 
     fn write(
@@ -501,13 +595,17 @@ impl Filesystem for FatFuse {
 
             let new_file_size = offset + bytes_written as u64;
 
-            if let Err(err) = inode.update_size(&self.fat_fs, new_file_size) {
-                debug!("error while updating size: {err}");
+            inode.update_size(new_file_size);
+
+            if let Err(err) = inode.write_back(&self.fat_fs) {
+                debug!("error while writing back inode: {err}");
 
                 reply.error(EIO);
                 return;
             }
         }
+
+        // TODO: update write and access time
 
         reply.written(bytes_written as u32);
     }
@@ -520,27 +618,31 @@ impl Filesystem for FatFuse {
         _lock_owner: u64,
         reply: fuser::ReplyEmpty,
     ) {
-        // debug!(
-        //     "[Not Implemented] flush(ino: {:#x?}, fh: {}, lock_owner: {:?})",
-        //     ino, fh, lock_owner
-        // );
-        // reply.error(ENOSYS);
-
         debug!("flushing ino={ino} fh={fh}");
 
-        let Some(&found_ino) = self.ino_by_fh.get(&fh) else {
+        let Some(inode) = self.get_inode_by_fh(fh) else {
             debug!("expected fh {fh} to be mapped to ino {ino}, but not found instead");
 
             reply.error(EBADF);
             return;
         };
 
-        if found_ino != ino {
+        let inode = inode.borrow();
+
+        if inode.ino() != ino {
             debug!(
-                "expected fh {fh} to be mapped to ino {ino}, but was mapped to {found_ino} instead"
+                "expected fh {fh} to be mapped to ino {ino}, but was mapped to {} instead",
+                inode.ino()
             );
 
             reply.error(EBADF);
+            return;
+        }
+
+        if inode.is_dir() {
+            debug!("called flush on directory (ino: {ino}, fh: {fh}");
+
+            reply.error(EISDIR);
             return;
         }
 
@@ -579,11 +681,38 @@ impl Filesystem for FatFuse {
         _req: &fuser::Request<'_>,
         ino: u64,
         fh: u64,
-        datasync: bool,
+        _datasync: bool,
         reply: fuser::ReplyEmpty,
     ) {
-        debug!("[Not Implemented] fsync(ino: {:#x?}, fh: {}, datasync: {})", ino, fh, datasync);
-        reply.error(ENOSYS);
+        debug!("flushing ino={ino} fh={fh}");
+
+        let Some(inode) = self.get_inode_by_fh(fh) else {
+            debug!("expected fh {fh} to be mapped to ino {ino}, but not found instead");
+
+            reply.error(EBADF);
+            return;
+        };
+
+        let inode = inode.borrow();
+
+        if inode.ino() != ino {
+            debug!(
+                "expected fh {fh} to be mapped to ino {ino}, but was mapped to {} instead",
+                inode.ino()
+            );
+
+            reply.error(EBADF);
+            return;
+        }
+
+        if !inode.is_dir() {
+            debug!("called fsync on directory (ino: {ino}, fh: {fh}");
+
+            reply.error(EISDIR);
+            return;
+        }
+
+        reply.ok();
     }
 
     fn opendir(
@@ -614,7 +743,7 @@ impl Filesystem for FatFuse {
             return;
         };
 
-        let Some(dir_inode) = self.get_inode_by_fh(fh) else {
+        let Some(dir_inode) = self.get_inode_by_fh(fh).cloned() else {
             debug!("could not find inode accociated with fh {} (ino: {})", fh, ino);
 
             reply.error(EBADF);
@@ -685,6 +814,8 @@ impl Filesystem for FatFuse {
         }
 
         reply.ok();
+
+        // TODO: update access time
     }
 
     fn readdirplus(
@@ -771,22 +902,6 @@ impl Filesystem for FatFuse {
             "[Not Implemented] create(parent: {:#x?}, name: {:?}, mode: {}, umask: {:#x?}, \
             flags: {:#x?})",
             parent, name, mode, umask, flags
-        );
-        reply.error(ENOSYS);
-    }
-
-    fn lseek(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        fh: u64,
-        offset: i64,
-        whence: i32,
-        reply: fuser::ReplyLseek,
-    ) {
-        debug!(
-            "[Not Implemented] lseek(ino: {:#x?}, fh: {}, offset: {}, whence: {})",
-            ino, fh, offset, whence
         );
         reply.error(ENOSYS);
     }

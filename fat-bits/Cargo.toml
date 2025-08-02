@@ -12,5 +12,6 @@ chrono = { version = "0.4.41", default-features = false, features = [
 ] }
 compact_str = "0.9.0"
 enum_dispatch = "0.3.13"
+log = "0.4.27"
 static_assertions = "1.1.0"
 thiserror = "2.0.12"

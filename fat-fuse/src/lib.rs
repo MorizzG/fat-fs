@@ -271,10 +271,10 @@ impl FatFuse {
         }
     }
 
-    pub fn get_inode_by_fh(&self, fh: u64) -> Option<InodeRef> {
+    pub fn get_inode_by_fh(&self, fh: u64) -> Option<&InodeRef> {
         let ino = *self.ino_by_fh.get(&fh)?;
 
-        if let Some(inode) = self.get_inode(ino).cloned() {
+        if let Some(inode) = self.get_inode(ino) {
             Some(inode)
         } else {
             debug!("fh {} is mapped to ino {}, but inode is not in table", fh, ino);

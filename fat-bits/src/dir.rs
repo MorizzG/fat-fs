@@ -1,9 +1,11 @@
 use std::fmt::Display;
 use std::io::{Read, Write};
+use std::time::SystemTime;
 
 use bitflags::bitflags;
-use chrono::{NaiveDate, NaiveDateTime, TimeDelta};
+use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeDelta, Timelike};
 use compact_str::CompactString;
+use log::debug;
 
 use crate::FatFs;
 use crate::datetime::{Date, Time};
@@ -52,7 +54,7 @@ impl Display for Attr {
 /// represents an entry in a diectory
 #[derive(Debug)]
 pub struct DirEntry {
-    name: [u8; 13],
+    name: [u8; 11],
     attr: Attr,
 
     create_time_tenths: u8,
@@ -70,6 +72,8 @@ pub struct DirEntry {
 
     checksum: u8,
     long_name: Option<CompactString>,
+
+    n_longname_slots: u8,
 
     offset: u64,
 }
@@ -96,62 +100,12 @@ impl Display for DirEntry {
 }
 
 impl DirEntry {
-    fn load_name(bytes: [u8; 11], attr: &Attr) -> [u8; 13] {
-        let mut name = [0; 13];
-
-        let mut iter = name.iter_mut();
-
-        if attr.contains(Attr::Hidden) && !attr.contains(Attr::VolumeId) {
-            // hidden file or folder
-            *iter.next().unwrap() = b'.';
-        }
-
-        fn truncate_trailing_spaces(mut bytes: &[u8]) -> &[u8] {
-            while bytes.last() == Some(&0x20) {
-                bytes = &bytes[..bytes.len() - 1];
-            }
-
-            bytes
-        }
-
-        let stem_bytes = truncate_trailing_spaces(&bytes[..8]);
-        let ext_bytes = truncate_trailing_spaces(&bytes[8..]);
-
-        for &c in stem_bytes {
-            let c = match c {
-                // reject non-ascii
-                // TODO: implement code pages? probably not...
-                c if c >= 128 => b'?',
-                c => c,
-            };
-
-            *iter.next().unwrap() = c;
-        }
-
-        if !ext_bytes.is_empty() {
-            *iter.next().unwrap() = b'.';
-
-            for &c in ext_bytes {
-                let c = match c {
-                    // reject non-ascii
-                    // TODO: implement code pages? probably not...
-                    c if c >= 128 => b'?',
-                    c => c,
-                };
-
-                *iter.next().unwrap() = c;
-            }
-        }
-
-        name
-    }
-
     pub fn load(bytes: &[u8], offset: u64) -> anyhow::Result<DirEntry> {
         assert_eq!(bytes.len(), 32);
 
         let attr = Attr::from_bits_truncate(bytes[11]);
 
-        let name = Self::load_name(bytes[..11].try_into().unwrap(), &attr);
+        let name = bytes[..11].try_into().unwrap();
 
         let create_time_tenths = bytes[13];
         anyhow::ensure!(
@@ -200,8 +154,36 @@ impl DirEntry {
             write_date,
             file_size,
             long_name: None,
+            n_longname_slots: 0,
             checksum: Self::checksum(&bytes[..11]),
             offset,
+        })
+    }
+
+    pub fn create(name: &str, attr: Attr) -> anyhow::Result<Self> {
+        let now: DateTime<Local> = SystemTime::now().into();
+
+        let create_date = Date::from_datetime(now)?;
+        let create_time = Time::from_datetime(now)?;
+        let create_time_tenths = (now.time().nanosecond() / 100_000_000) as u8;
+
+        let name = [0; 11];
+
+        Ok(DirEntry {
+            name,
+            attr,
+            create_time_tenths,
+            create_time,
+            create_date,
+            last_access_date: create_date,
+            first_cluster: 0,
+            write_time: create_time,
+            write_date: create_date,
+            file_size: 0,
+            checksum: Self::checksum(&name),
+            long_name: None,
+            n_longname_slots: 0,
+            offset: !0,
         })
     }
 
@@ -263,7 +245,7 @@ impl DirEntry {
     }
 
     /// write this DisEntry back to the underlying data
-    pub fn update(&self, fat_fs: &FatFs) -> std::io::Result<()> {
+    pub fn write_back(&self, fat_fs: &FatFs) -> std::io::Result<()> {
         eprintln!("making new SubSliceMut at offset {:#X}", self.offset);
         let sub_slice = SubSliceMut::new(fat_fs.inner.clone(), self.offset, 32);
 
@@ -279,6 +261,8 @@ impl DirEntry {
 
         // paste over with zeros
         sub_slice.write_all(&[0; 31])
+
+        // TODO: erase long filename entries as well
     }
 
     /// indicates this DirEntry is empty
@@ -329,13 +313,7 @@ impl DirEntry {
     }
 
     pub fn name(&self) -> &[u8] {
-        let mut name: &[u8] = &self.name;
-
-        while let Some(&0) = name.last() {
-            name = &name[..name.len() - 1];
-        }
-
-        name
+        &self.name
     }
 
     pub fn stem(&self) -> &[u8] {
@@ -386,7 +364,7 @@ impl DirEntry {
             {
                 '?'
             } else {
-                c as char
+                (c as char).to_ascii_uppercase()
             }
         }
 
@@ -405,8 +383,9 @@ impl DirEntry {
         self.long_name.as_deref()
     }
 
-    pub fn set_long_name(&mut self, long_name: CompactString) {
+    pub fn set_long_name(&mut self, long_name: CompactString, n_slots: u8) {
         self.long_name = Some(long_name);
+        self.n_longname_slots = n_slots;
     }
 
     pub fn attr(&self) -> Attr {
@@ -428,6 +407,15 @@ impl DirEntry {
         self.last_access_date.to_naive_date()
     }
 
+    pub fn update_last_access_date(
+        &mut self,
+        time: impl Into<DateTime<Local>>,
+    ) -> anyhow::Result<()> {
+        self.last_access_date = Date::from_datetime(time.into())?;
+
+        Ok(())
+    }
+
     pub fn first_cluster(&self) -> u32 {
         self.first_cluster
     }
@@ -437,6 +425,15 @@ impl DirEntry {
         let date = self.write_date.to_naive_date();
 
         NaiveDateTime::new(date, time)
+    }
+
+    pub fn update_write_time(&mut self, time: impl Into<DateTime<Local>>) -> anyhow::Result<()> {
+        let time = time.into();
+
+        self.write_date = Date::from_datetime(time)?;
+        self.write_time = Time::from_datetime(time)?;
+
+        Ok(())
     }
 
     pub fn file_size(&self) -> u32 {
@@ -461,6 +458,7 @@ impl DirEntry {
 /// long filename entry in a directory
 ///
 /// this should not be exposed to end users, only for internal consumption in the DirIter
+#[derive(Debug)]
 struct LongNameDirEntry {
     ordinal: u8,
     is_last: bool,
@@ -535,6 +533,7 @@ impl LongNameDirEntry {
 ///
 /// should not be exposed publicly, end users only see DirEntries
 /// just for making the bytes -> DirEntry loading a bit easier
+#[derive(Debug)]
 enum DirEntryWrapper {
     Regular(DirEntry),
     LongName(LongNameDirEntry),
@@ -561,6 +560,7 @@ struct LongFilenameBuf {
     rev_buf: Vec<u16>,
     checksum: Option<u8>,
     last_ordinal: Option<u8>,
+    n_slots: u8,
 }
 
 impl LongFilenameBuf {
@@ -568,6 +568,7 @@ impl LongFilenameBuf {
         self.rev_buf.clear();
         self.checksum = None;
         self.last_ordinal = None;
+        self.n_slots = 0;
     }
 
     pub fn next(&mut self, dir_entry: LongNameDirEntry) -> anyhow::Result<()> {
@@ -597,6 +598,8 @@ impl LongFilenameBuf {
             self.extend_name(name);
             self.checksum = Some(dir_entry.checksum());
             self.last_ordinal = Some(dir_entry.ordinal());
+
+            self.n_slots += 1;
 
             return Ok(());
         }
@@ -629,7 +632,10 @@ impl LongFilenameBuf {
         self.rev_buf.extend(name.iter().rev());
     }
 
-    pub fn get_buf(&mut self, checksum: u8) -> anyhow::Result<Option<impl Iterator<Item = u16>>> {
+    pub fn get_buf(
+        &mut self,
+        checksum: u8,
+    ) -> anyhow::Result<Option<(impl Iterator<Item = u16>, u8)>> {
         if self.checksum.is_none() {
             return Ok(None);
         }
@@ -653,7 +659,7 @@ impl LongFilenameBuf {
 
         anyhow::ensure!(self.rev_buf.len() <= 255, "long filename too long");
 
-        Ok(Some(self.rev_buf.iter().copied().rev()))
+        Ok(Some((self.rev_buf.iter().copied().rev(), self.n_slots)))
     }
 }
 
@@ -713,7 +719,7 @@ impl Iterator for DirIter<'_> {
                 return next_impl(me);
             }
 
-            if let Some(iter) = me
+            if let Some((iter, n_slots)) = me
                 .long_filename_buf
                 .get_buf(dir_entry.checksum)
                 .map_err(|e| {
@@ -729,7 +735,7 @@ impl Iterator for DirIter<'_> {
                 let long_filename: CompactString =
                     char::decode_utf16(iter).filter_map(|x| x.ok()).collect();
 
-                dir_entry.set_long_name(long_filename);
+                dir_entry.set_long_name(long_filename, n_slots);
             }
 
             me.long_filename_buf.reset();
@@ -741,7 +747,7 @@ impl Iterator for DirIter<'_> {
             Ok(x) => x,
             Err(e) => {
                 // print error message, try next
-                eprintln!("{}", e);
+                debug!("{}", e);
 
                 self.next()
             }

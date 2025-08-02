@@ -60,29 +60,42 @@ pub struct Inode {
 
     ref_count: u64,
 
+    uid: u32,
+    gid: u32,
+
+    path: Rc<str>,
+
     parent: Option<InodeRef>,
 
-    size: u64,
     block_size: u32,
 
     kind: Kind,
 
     read_only: bool,
 
+    dirty: bool,
+
+    // these are the fields that have to get written back to the DirEntry on write_back
+    size: u64,
+
     atime: SystemTime,
     mtime: SystemTime,
-    // ctime: SystemTime,
     crtime: SystemTime,
 
-    uid: u32,
-    gid: u32,
-
     first_cluster: u32,
-
-    path: Rc<str>,
 }
 
-#[allow(dead_code)]
+impl Drop for Inode {
+    fn drop(&mut self) {
+        // since we don't have a handle on the FatFs we can't do the write-back here
+        assert!(
+            !self.dirty,
+            "inode {} is dirty, but was not written back to FS before being destroyed",
+            self.ino()
+        );
+    }
+}
+
 impl Inode {
     fn new_generation() -> u32 {
         let rand: u16 = get_random();
@@ -144,6 +157,7 @@ impl Inode {
             block_size: fat_fs.bytes_per_sector() as u32,
             kind,
             read_only: dir_entry.is_readonly(),
+            dirty: false,
             atime,
             mtime,
             crtime,
@@ -166,6 +180,7 @@ impl Inode {
             block_size: fat_fs.bytes_per_sector() as u32,
             kind: Kind::Dir,
             read_only: false,
+            dirty: false,
             atime: SystemTime::UNIX_EPOCH,
             mtime: SystemTime::UNIX_EPOCH,
             crtime: SystemTime::UNIX_EPOCH,
@@ -226,39 +241,6 @@ impl Inode {
 
     pub fn size(&self) -> u64 {
         self.size
-    }
-
-    pub fn update_size(&mut self, fat_fs: &FatFs, new_size: u64) -> anyhow::Result<()> {
-        let Some(parent_inode) = self.parent() else {
-            anyhow::bail!("parent inode of {} does not exist", self.ino);
-        };
-
-        let parent_inode = parent_inode.borrow();
-
-        // since we just wrote to the file with this inode, first cluster should not be zero
-        let Some(mut dir_entry) = parent_inode
-            .dir_iter(fat_fs)
-            .unwrap()
-            .find(|dir_entry| dir_entry.first_cluster() == self.first_cluster())
-        else {
-            anyhow::bail!("could not find dir_entry corresponding to self in parent inode");
-        };
-
-        debug!("new file size: {new_size}");
-
-        assert!(new_size <= u32::MAX as u64);
-
-        dir_entry.update_file_size(new_size as u32);
-
-        if dir_entry.update(fat_fs).is_err() {
-            anyhow::bail!("failed to update dir_entry for inode {}", self.ino);
-        }
-
-        drop(parent_inode);
-
-        self.size = new_size;
-
-        Ok(())
     }
 
     pub fn kind(&self) -> Kind {
@@ -346,9 +328,67 @@ impl Inode {
         Ok(fat_fs.file_writer(self.first_cluster()))
     }
 
-    // pub fn write_back(&self, fat_fs: &FatFs) {
-    //     // let
+    pub fn update_size(&mut self, new_size: u64) {
+        self.size = new_size;
+        self.dirty = true;
+    }
 
-    //     todo!()
-    // }
+    pub fn update_atime(&mut self, atime: SystemTime) {
+        self.atime = atime;
+        self.dirty = true;
+    }
+
+    pub fn update_mtime(&mut self, mtime: SystemTime) {
+        self.mtime = mtime;
+        self.dirty = true;
+    }
+
+    pub fn write_back(&mut self, fat_fs: &FatFs) -> anyhow::Result<()> {
+        if !self.dirty {
+            return Ok(());
+        }
+
+        let Some(parent_inode) = self.parent() else {
+            anyhow::bail!("parent inode of {} does not exist", self.ino);
+        };
+
+        let parent_inode = parent_inode.borrow();
+
+        // since we just wrote to the file with this inode, first cluster should not be zero
+        let Some(mut dir_entry) = parent_inode
+            .dir_iter(fat_fs)
+            .unwrap()
+            .find(|dir_entry| dir_entry.first_cluster() == self.first_cluster())
+        else {
+            anyhow::bail!("could not find dir_entry corresponding to self in parent inode");
+        };
+
+        drop(parent_inode);
+
+        // update stats on DirEntry
+        assert!(self.size <= u32::MAX as u64);
+
+        dir_entry.update_file_size(self.size as u32);
+
+        dir_entry
+            .update_last_access_date(self.atime)
+            .map_err(|err| {
+                anyhow::anyhow!("failed to update atime for inode {}: {err}", self.ino)
+            })?;
+
+        dir_entry.update_write_time(self.mtime).map_err(|err| {
+            anyhow::anyhow!("failed to update mtime for inode {}: {err}", self.ino)
+        })?;
+
+        // update cr_time as well?
+
+        // write DirEntry back to device
+        dir_entry.write_back(fat_fs).map_err(|err| {
+            anyhow::anyhow!("failed to write back dir_entry for inode {}: {err}", self.ino)
+        })?;
+
+        self.dirty = false;
+
+        Ok(())
+    }
 }
