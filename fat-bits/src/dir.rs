@@ -160,7 +160,8 @@ impl DirEntry {
         })
     }
 
-    pub fn create(name: &str, attr: Attr) -> anyhow::Result<Self> {
+    pub fn create(_name: &str, attr: Attr) -> anyhow::Result<Self> {
+        // TODO
         let now: DateTime<Local> = SystemTime::now().into();
 
         let create_date = Date::from_datetime(now)?;
